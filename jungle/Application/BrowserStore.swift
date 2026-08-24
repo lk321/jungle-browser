@@ -27,11 +27,8 @@ final class BrowserStore: ObservableObject {
         self.persistence = resolvedPersistence
         let browserSettings = settings ?? BrowserSettings(persistence: resolvedPersistence)
         self.settings = browserSettings
-        let personal = BrowserProfile(name: "Personal", symbol: "person.crop.circle", tint: .systemGreen)
-        let work = BrowserProfile(name: "Work", symbol: "briefcase", tint: .systemOrange)
-        let study = BrowserProfile(name: "Study", symbol: "book.closed", tint: .systemBlue)
-        let browserProfiles = [personal, work, study]
-        let firstTab = BrowserTab(profileID: personal.id, address: browserSettings.searchEngine.homeURL)
+        let browserProfiles = resolvedPersistence.loadProfiles()
+        let firstTab = BrowserTab(profileID: browserProfiles[0].id, address: browserSettings.searchEngine.homeURL)
         let workspace = resolvedPersistence.loadWorkspace(profiles: browserProfiles)
         profiles = browserProfiles
         tabs = workspace?.tabs ?? [firstTab]
@@ -111,6 +108,47 @@ final class BrowserStore: ObservableObject {
     func switchProfile(number: Int) {
         guard profiles.indices.contains(number - 1) else { return }
         switchProfile(to: profiles[number - 1].id)
+    }
+
+    func createProfile() {
+        let tint = ProfileTint.allCases[profiles.count % ProfileTint.allCases.count]
+        let profile = BrowserProfile(name: "Profile \(profiles.count + 1)", symbol: "person.crop.circle", tint: tint)
+        profiles.append(profile)
+        persistProfiles()
+        switchProfile(to: profile.id)
+    }
+
+    func renameProfile(_ profileID: UUID, to name: String) {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
+        updateProfile(profileID, name: name, symbol: profile.symbol, tint: profile.tint)
+    }
+
+    func updateProfile(_ profileID: UUID, name: String, symbol: String, tint: ProfileTint) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, let index = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        let profile = profiles[index]
+        profiles[index] = BrowserProfile(id: profile.id, name: trimmedName, symbol: symbol, tint: tint, dataStoreID: profile.dataStoreID)
+        persistProfiles()
+    }
+
+    func deleteProfile(_ profileID: UUID) {
+        guard profiles.count > 1, let index = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        let removedTabs = tabs.filter { $0.profileID == profileID }
+        removedTabs.forEach { WebViewPool.shared.discard($0.id) }
+        tabs.removeAll { $0.profileID == profileID }
+        profiles.remove(at: index)
+        if activeProfileID == profileID {
+            activeProfileID = profiles[0].id
+        }
+        if !tabs.contains(where: { $0.profileID == activeProfileID }) {
+            let tab = BrowserTab(profileID: activeProfileID, address: settings.searchEngine.homeURL)
+            tabs.append(tab)
+            selectedTabID = tab.id
+        } else if let selectedID = selectedTabID, !tabs.contains(where: { $0.id == selectedID }) {
+            selectedTabID = tabs.first(where: { $0.profileID == activeProfileID })?.id
+        }
+        persistProfiles()
+        persistWorkspace()
     }
 
     func toggleSidebar() {
@@ -293,6 +331,10 @@ final class BrowserStore: ObservableObject {
 
     private func persistWorkspace() {
         persistence.saveWorkspace(tabs: tabs, profiles: profiles, activeProfileID: activeProfileID, selectedTabID: selectedTabID)
+    }
+
+    private func persistProfiles() {
+        persistence.saveProfiles(profiles)
     }
 
     private func suggestionScore(_ suggestion: AddressSuggestion, query: String) -> Int {

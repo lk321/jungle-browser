@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct BrowserWorkspaceView: View {
@@ -32,7 +33,9 @@ struct BrowserWorkspaceView: View {
         .task {
             addressInput = store.selectedTab?.address.absoluteString ?? ""
             store.beginMemoryHousekeeping()
+            publishTrafficLightsVisibility()
         }
+        .onChange(of: store.isSidebarVisible) { _, _ in publishTrafficLightsVisibility() }
         .onChange(of: store.selectedTabID) { _, _ in
             addressInput = store.selectedTab?.address.absoluteString ?? ""
         }
@@ -40,6 +43,12 @@ struct BrowserWorkspaceView: View {
         .onReceive(NotificationCenter.default.publisher(for: .jungleCommandPalette)) { _ in
             store.isCommandPalettePresented = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleOpenSettings)) { _ in
+            store.isSettingsPresented = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleGoBack)) { _ in store.goBack() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleGoForward)) { _ in store.goForward() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleReload)) { _ in store.reloadSelectedTab() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleCycleTabs)) { _ in store.cycleTabs() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleToggleSidebar)) { _ in store.toggleSidebar() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleMoveTab)) { notification in
@@ -61,7 +70,7 @@ struct BrowserWorkspaceView: View {
             return .handled
         }
         .sheet(isPresented: $store.isCommandPalettePresented) { CommandPalette(store: store) }
-        .sheet(isPresented: $store.isSettingsPresented) { BrowserSettingsView(settings: store.settings) }
+        .sheet(isPresented: $store.isSettingsPresented) { BrowserSettingsView(settings: store.settings, store: store) }
     }
 
     @ViewBuilder
@@ -82,7 +91,16 @@ struct BrowserWorkspaceView: View {
                 }
             }
             .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func publishTrafficLightsVisibility() {
+        NotificationCenter.default.post(
+            name: .jungleTrafficLightsVisibility,
+            object: nil,
+            userInfo: ["isVisible": store.isSidebarVisible]
+        )
     }
 }
 
@@ -171,15 +189,23 @@ private struct BrowserSidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            trafficLightProfileRow
             sidebarHeader
             navigationBar
             quickAccess
-            profilePicker
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
+                LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(store.bookmarkFolders.filter { !$0.isQuickAccess }) { folder in
                         bookmarkFolder(folder)
+                    }
+
+                    if !store.bookmarkFolders.filter({ !$0.isQuickAccess }).isEmpty {
+                        Divider()
+                            .overlay(.primary.opacity(0.035))
+                            .padding(.horizontal, 8)
+                            .padding(.top, 16)
+                            .padding(.bottom, 8)
                     }
 
                     let pinnedTabs = store.visibleTabs.filter(\.isPinned)
@@ -187,16 +213,17 @@ private struct BrowserSidebar: View {
                         sidebarLabel("PINNED")
                         ForEach(pinnedTabs) { tab in tabRow(tab) }
                     }
-                    sidebarLabel("OPEN TABS")
+                    openTabsHeader
                     ForEach(store.visibleTabs.filter { !$0.isPinned }) { tab in tabRow(tab) }
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
             }
+            .simultaneousGesture(TapGesture().onEnded { dismissAddressFocus() })
 
             sidebarFooter
+                .simultaneousGesture(TapGesture().onEnded { dismissAddressFocus() })
         }
-        .padding(.top, 34)
         .alert("New folder", isPresented: $isNewFolderPresented) {
             TextField("Folder name", text: $newFolderName)
             Button("Create") {
@@ -211,7 +238,10 @@ private struct BrowserSidebar: View {
 
     private var sidebarHeader: some View {
         HStack {
-            Button(action: store.toggleSidebar) { Image(systemName: "sidebar.left") }
+            Button(action: {
+                dismissAddressFocus()
+                store.toggleSidebar()
+            }) { Image(systemName: "sidebar.left") }
                 .buttonStyle(ChromeIconButtonStyle())
                 .accessibilityLabel("Toggle sidebar")
             Spacer(minLength: 0)
@@ -223,6 +253,17 @@ private struct BrowserSidebar: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
+        .simultaneousGesture(TapGesture().onEnded { dismissAddressFocus() })
+    }
+
+    private var trafficLightProfileRow: some View {
+        HStack {
+            Spacer()
+            profilePicker
+        }
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity)
+        .simultaneousGesture(TapGesture().onEnded { dismissAddressFocus() })
     }
 
     private var navigationBar: some View {
@@ -235,7 +276,10 @@ private struct BrowserSidebar: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .focused($isAddressFocused)
-                    .onSubmit { store.navigate(to: addressInput) }
+                    .onSubmit {
+                        store.navigate(to: addressInput)
+                        dismissAddressFocus()
+                    }
                 if store.isSelectedTabLoading { ProgressView().controlSize(.mini).tint(.green) }
             }
             .padding(.horizontal, 11)
@@ -277,6 +321,8 @@ private struct BrowserSidebar: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .pointerCursor()
+                .interactiveHover(cornerRadius: 8)
             }
         }
         .padding(4)
@@ -306,21 +352,24 @@ private struct BrowserSidebar: View {
                     Image(systemName: "ellipsis").font(.caption.weight(.bold)).foregroundStyle(.secondary)
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .accessibilityLabel("Quick Access options")
+                .pointerCursor()
             }
             HStack(spacing: 7) {
                 ForEach(Array(links)) { bookmark in
                     Button { store.openBookmark(bookmark) } label: {
-                        VStack(spacing: 5) {
-                            Image(systemName: bookmark.symbol).font(.system(size: 14, weight: .semibold))
-                            Text(bookmark.title).lineLimit(1).font(.caption2.weight(.medium))
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 56)
-                        .padding(.horizontal, 4)
+                        TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
+                            .frame(width: 20, height: 20)
+                            .frame(maxWidth: .infinity, minHeight: 48)
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 11))
                         .overlay(RoundedRectangle(cornerRadius: 11).stroke(.white.opacity(0.10)))
                     }
                     .buttonStyle(.plain)
+                    .pointerCursor()
+                    .interactiveHover(cornerRadius: 11)
+                    .help(bookmark.title)
+                    .accessibilityLabel(bookmark.title)
                     .contextMenu {
                         Button("Remove from Quick Access", role: .destructive) {
                             guard let folderID = store.bookmarkFolders.first(where: \.isQuickAccess)?.id else { return }
@@ -335,20 +384,23 @@ private struct BrowserSidebar: View {
 
     private func bookmarkFolder(_ folder: BookmarkFolder) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Button { store.toggleFolder(folder.id) } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: folder.isExpanded ? "folder.fill" : "folder")
-                        Text(folder.name).font(.system(size: 12, weight: .semibold, design: .rounded))
-                    }
-                    .foregroundStyle(.secondary)
+            Button { store.toggleFolder(folder.id) } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: folder.isExpanded ? "folder.fill" : "folder")
+                    Text(folder.name).font(.system(size: 12, weight: .semibold, design: .rounded))
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                Spacer()
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 5)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.clear, in: RoundedRectangle(cornerRadius: 9))
+            .interactiveHover(cornerRadius: 9)
             .contextMenu {
                 Button("Save current page") { store.saveCurrentPage(to: folder.id) }
                 Button("Delete folder", role: .destructive) { store.deleteFolder(folder.id) }
@@ -356,15 +408,21 @@ private struct BrowserSidebar: View {
             if folder.isExpanded {
                 ForEach(folder.bookmarks) { bookmark in
                     Button { store.openBookmark(bookmark) } label: {
-                        Label(bookmark.title, systemImage: bookmark.symbol)
-                            .lineLimit(1)
-                            .font(.system(size: 13, weight: .regular, design: .rounded))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+                        HStack(spacing: 8) {
+                            TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
+                                .frame(width: 14, height: 14)
+                            Text(bookmark.title)
+                                .lineLimit(1)
+                                .font(.system(size: 13, weight: .regular, design: .rounded))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
+                    .pointerCursor()
+                    .interactiveHover(cornerRadius: 8)
                     .contextMenu {
                         Button("Remove bookmark", role: .destructive) { store.deleteBookmark(bookmark.id, from: folder.id) }
                     }
@@ -380,17 +438,15 @@ private struct BrowserSidebar: View {
                     .font(.system(size: 12, weight: .medium, design: .rounded))
             }
             .buttonStyle(.plain)
+            .pointerCursor()
             Spacer()
             Button { isNewFolderPresented = true } label: {
                 Image(systemName: "folder.badge.plus").font(.subheadline.weight(.medium))
             }
+            .help("Create folder")
             .buttonStyle(.plain)
+            .pointerCursor()
             .accessibilityLabel("Create bookmark folder")
-            Button(action: store.createTab) {
-                Image(systemName: "plus").font(.subheadline.weight(.medium))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("New tab")
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 16)
@@ -406,9 +462,9 @@ private struct BrowserSidebar: View {
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: store.activeProfile.symbol)
-                    .foregroundStyle(Color(nsColor: store.activeProfile.tint))
+                    .foregroundStyle(Color(nsColor: store.activeProfile.tint.color))
                     .frame(width: 25, height: 25)
-                    .background(Color(nsColor: store.activeProfile.tint).opacity(0.12), in: Circle())
+                    .background(Color(nsColor: store.activeProfile.tint.color).opacity(0.12), in: Circle())
                 Text(store.activeProfile.name)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                 Spacer()
@@ -423,7 +479,8 @@ private struct BrowserSidebar: View {
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.primary.opacity(0.06)))
         }
         .menuStyle(.borderlessButton)
-        .padding(.horizontal, 12)
+        .padding(.trailing, 12)
+        .pointerCursor()
     }
 
     private func sidebarLabel(_ title: String) -> some View {
@@ -434,8 +491,25 @@ private struct BrowserSidebar: View {
             .padding(.top, 7)
     }
 
+    private var openTabsHeader: some View {
+        HStack {
+            sidebarLabel("OPEN TABS")
+            Spacer()
+            Button(action: store.createTab) {
+                Image(systemName: "plus")
+                    .font(.caption.weight(.bold))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .help("New tab")
+            .accessibilityLabel("New tab")
+            .padding(.trailing, 8)
+        }
+    }
+
     private func tabRow(_ tab: BrowserTab) -> some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 8) {
             TabFavicon(address: tab.address, isSuspended: tab.isSuspended, isPinned: tab.isPinned)
                 .frame(width: 14, height: 14)
             Text(tab.title)
@@ -444,13 +518,15 @@ private struct BrowserSidebar: View {
             Spacer(minLength: 0)
             Button { store.close(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
                 .buttonStyle(.plain)
+                .pointerCursor()
                 .opacity(tab.id == store.selectedTabID ? 0.7 : 0)
                 .accessibilityLabel("Close \(tab.title)")
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .contentShape(Rectangle())
         .background(tab.id == store.selectedTabID ? Color.green.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 9))
+        .interactiveHover(cornerRadius: 9)
         .onTapGesture { store.select(tab.id) }
         .contextMenu {
             Button(tab.isPinned ? "Unpin tab" : "Pin tab") { store.togglePinned(tab.id) }
@@ -463,9 +539,16 @@ private struct BrowserSidebar: View {
     }
 
     private func chromeButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol) }
+        Button(action: {
+            dismissAddressFocus()
+            action()
+        }) { Image(systemName: symbol) }
             .buttonStyle(ChromeIconButtonStyle())
             .accessibilityLabel(label)
+    }
+
+    private func dismissAddressFocus() {
+        isAddressFocused = false
     }
 
 }
@@ -474,6 +557,14 @@ private struct TabFavicon: View {
     let address: URL
     let isSuspended: Bool
     let isPinned: Bool
+    let fallbackSymbol: String
+
+    init(address: URL, isSuspended: Bool, isPinned: Bool, fallbackSymbol: String = "globe") {
+        self.address = address
+        self.isSuspended = isSuspended
+        self.isPinned = isPinned
+        self.fallbackSymbol = fallbackSymbol
+    }
 
     var body: some View {
         if isSuspended {
@@ -485,11 +576,11 @@ private struct TabFavicon: View {
                 if let image = phase.image {
                     image.resizable().scaledToFit()
                 } else {
-                    Image(systemName: "globe").foregroundStyle(.secondary)
+                    Image(systemName: fallbackSymbol).foregroundStyle(.secondary)
                 }
             }
         } else {
-            Image(systemName: "globe").foregroundStyle(.secondary)
+            Image(systemName: fallbackSymbol).foregroundStyle(.secondary)
         }
     }
 
@@ -507,6 +598,41 @@ private struct ChromeIconButtonStyle: ButtonStyle {
             .frame(width: 30, height: 30)
             .background(configuration.isPressed ? Color.primary.opacity(0.13) : Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
             .contentShape(RoundedRectangle(cornerRadius: 8))
+            .pointerCursor()
+    }
+}
+
+struct PointerCursorModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content.onHover { isHovering in
+            (isHovering ? NSCursor.pointingHand : NSCursor.arrow).set()
+        }
+    }
+}
+
+extension View {
+    func pointerCursor() -> some View {
+        modifier(PointerCursorModifier())
+    }
+
+    func interactiveHover(cornerRadius: CGFloat) -> some View {
+        modifier(InteractiveHoverModifier(cornerRadius: cornerRadius))
+    }
+}
+
+private struct InteractiveHoverModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(Color.primary.opacity(isHovering ? 0.075 : 0))
+                    .allowsHitTesting(false)
+            }
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .onHover { isHovering = $0 }
     }
 }
 
@@ -563,10 +689,15 @@ private struct CommandPalette: View {
 
             paletteSection("ACTIONS") {
                 command("New tab", symbol: "plus.square.on.square", shortcut: "⌘T") { store.createTab() }
+                command("Back", symbol: "chevron.left", shortcut: "⌘[") { store.goBack() }
+                command("Forward", symbol: "chevron.right", shortcut: "⌘]") { store.goForward() }
+                command("Reload page", symbol: "arrow.clockwise", shortcut: "⌘R") { store.reloadSelectedTab() }
                 command("Cycle open tabs", symbol: "rectangle.3.group", shortcut: "⌥⌘⇥") { store.cycleTabs() }
                 command("Toggle tab pin", symbol: "pin", shortcut: "") {
                     if let tabID = store.selectedTabID { store.togglePinned(tabID) }
                 }
+                command("Toggle sidebar", symbol: "sidebar.left", shortcut: "⌘B") { store.toggleSidebar() }
+                command("Browser settings", symbol: "gearshape", shortcut: "⌘,") { store.isSettingsPresented = true }
             }
 
             if !store.visibleTabs.isEmpty {
@@ -581,6 +712,7 @@ private struct CommandPalette: View {
                                 .background(.clear, in: RoundedRectangle(cornerRadius: 8))
                         }
                         .buttonStyle(.plain)
+                        .pointerCursor()
                     }
                 }
             }
@@ -602,6 +734,7 @@ private struct CommandPalette: View {
             .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
+        .pointerCursor()
     }
 
     private func paletteSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

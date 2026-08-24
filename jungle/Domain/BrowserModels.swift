@@ -1,19 +1,35 @@
 import AppKit
 import Foundation
 
+enum ProfileTint: String, CaseIterable, Codable, Hashable {
+    case green
+    case orange
+    case blue
+    case purple
+
+    var color: NSColor {
+        switch self {
+        case .green: .systemGreen
+        case .orange: .systemOrange
+        case .blue: .systemBlue
+        case .purple: .systemPurple
+        }
+    }
+}
+
 struct BrowserProfile: Identifiable, Hashable {
     let id: UUID
     let name: String
     let symbol: String
-    let tint: NSColor
+    let tint: ProfileTint
     let dataStoreID: UUID
 
-    init(name: String, symbol: String, tint: NSColor) {
-        id = UUID()
+    init(id: UUID = UUID(), name: String, symbol: String, tint: ProfileTint, dataStoreID: UUID = UUID()) {
+        self.id = id
         self.name = name
         self.symbol = symbol
         self.tint = tint
-        dataStoreID = UUID()
+        self.dataStoreID = dataStoreID
     }
 }
 

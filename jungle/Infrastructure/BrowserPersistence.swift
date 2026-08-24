@@ -84,6 +84,25 @@ final class PersistedTab {
     }
 }
 
+@Model
+final class PersistedProfile {
+    @Attribute(.unique) var id: UUID
+    var name: String
+    var symbol: String
+    var tint: String
+    var dataStoreID: UUID
+    var sortIndex: Int
+
+    init(id: UUID, name: String, symbol: String, tint: String, dataStoreID: UUID, sortIndex: Int) {
+        self.id = id
+        self.name = name
+        self.symbol = symbol
+        self.tint = tint
+        self.dataStoreID = dataStoreID
+        self.sortIndex = sortIndex
+    }
+}
+
 @MainActor
 final class BrowserPersistence {
     static let shared = BrowserPersistence()
@@ -95,7 +114,8 @@ final class BrowserPersistence {
             PersistedBrowserSettings.self,
             PersistedBookmarkFolder.self,
             PersistedBookmark.self,
-            PersistedTab.self
+            PersistedTab.self,
+            PersistedProfile.self
         ])
         let configuration = ModelConfiguration("Jungle", schema: schema)
         do {
@@ -125,6 +145,37 @@ final class BrowserPersistence {
         settings.searchEngine = searchEngine.rawValue
         settings.appearance = appearance.rawValue
         settings.tabSleepInterval = tabSleepInterval
+        save()
+    }
+
+    func loadProfiles() -> [BrowserProfile] {
+        let records = (try? context.fetch(FetchDescriptor<PersistedProfile>(sortBy: [SortDescriptor(\.sortIndex)]))) ?? []
+        guard !records.isEmpty else {
+            let defaults = [
+                BrowserProfile(name: "Personal", symbol: "person.crop.circle", tint: .green),
+                BrowserProfile(name: "Work", symbol: "briefcase", tint: .orange),
+                BrowserProfile(name: "Study", symbol: "book.closed", tint: .blue)
+            ]
+            saveProfiles(defaults)
+            return defaults
+        }
+        return records.map {
+            BrowserProfile(
+                id: $0.id,
+                name: $0.name,
+                symbol: $0.symbol,
+                tint: ProfileTint(rawValue: $0.tint) ?? .green,
+                dataStoreID: $0.dataStoreID
+            )
+        }
+    }
+
+    func saveProfiles(_ profiles: [BrowserProfile]) {
+        let records = (try? context.fetch(FetchDescriptor<PersistedProfile>())) ?? []
+        records.forEach(context.delete)
+        for (index, profile) in profiles.enumerated() {
+            context.insert(PersistedProfile(id: profile.id, name: profile.name, symbol: profile.symbol, tint: profile.tint.rawValue, dataStoreID: profile.dataStoreID, sortIndex: index))
+        }
         save()
     }
 

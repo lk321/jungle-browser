@@ -23,10 +23,26 @@ struct JungleApp: App {
                     NotificationCenter.default.post(name: .jungleNewTab, object: nil)
                 }
                 .keyboardShortcut("t", modifiers: .command)
+                Button("Back") {
+                    NotificationCenter.default.post(name: .jungleGoBack, object: nil)
+                }
+                .keyboardShortcut("[", modifiers: .command)
+                Button("Forward") {
+                    NotificationCenter.default.post(name: .jungleGoForward, object: nil)
+                }
+                .keyboardShortcut("]", modifiers: .command)
+                Button("Reload") {
+                    NotificationCenter.default.post(name: .jungleReload, object: nil)
+                }
+                .keyboardShortcut("r", modifiers: .command)
                 Button("Open Command Palette") {
                     NotificationCenter.default.post(name: .jungleCommandPalette, object: nil)
                 }
                 .keyboardShortcut("k", modifiers: .command)
+                Button("Browser Settings") {
+                    NotificationCenter.default.post(name: .jungleOpenSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
                 Button("Next Open Tab") {
                     NotificationCenter.default.post(name: .jungleCycleTabs, object: nil)
                 }
@@ -61,4 +77,9 @@ extension Notification.Name {
     static let jungleMoveTab = Notification.Name("jungle.move-tab")
     static let jungleToggleSidebar = Notification.Name("jungle.toggle-sidebar")
     static let jungleSwitchProfile = Notification.Name("jungle.switch-profile")
+    static let jungleTrafficLightsVisibility = Notification.Name("jungle.traffic-lights-visibility")
+    static let jungleOpenSettings = Notification.Name("jungle.open-settings")
+    static let jungleGoBack = Notification.Name("jungle.go-back")
+    static let jungleGoForward = Notification.Name("jungle.go-forward")
+    static let jungleReload = Notification.Name("jungle.reload")
 }

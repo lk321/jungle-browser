@@ -2,6 +2,7 @@ import SwiftUI
 
 struct BrowserSettingsView: View {
     @ObservedObject var settings: BrowserSettings
+    @ObservedObject var store: BrowserStore
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -46,9 +47,20 @@ struct BrowserSettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            settingsSection("PROFILES") {
+                ForEach(store.profiles) { profile in
+                    ProfileSettingsRow(profile: profile, store: store, canDelete: store.profiles.count > 1)
+                }
+                Button(action: store.createProfile) {
+                    Label("Add profile", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .pointerCursor()
+            }
         }
+        .frame(width: 386, alignment: .leading)
         .padding(22)
-        .frame(width: 430)
         .background(.regularMaterial)
     }
 
@@ -60,6 +72,106 @@ struct BrowserSettingsView: View {
             content()
         }
         .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct ProfileSettingsRow: View {
+    let profile: BrowserProfile
+    @ObservedObject var store: BrowserStore
+    let canDelete: Bool
+    @State private var name: String
+    @State private var symbol: String
+    @State private var tint: ProfileTint
+    @State private var isEditing = false
+    @State private var isHovering = false
+
+    private let symbols = ["person.crop.circle", "briefcase", "book.closed", "paintpalette", "star", "gamecontroller"]
+
+    init(profile: BrowserProfile, store: BrowserStore, canDelete: Bool) {
+        self.profile = profile
+        self.store = store
+        self.canDelete = canDelete
+        _name = State(initialValue: profile.name)
+        _symbol = State(initialValue: profile.symbol)
+        _tint = State(initialValue: profile.tint)
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: isEditing ? symbol : profile.symbol)
+                .foregroundStyle(Color(nsColor: (isEditing ? tint : profile.tint).color))
+                .frame(width: 25, height: 25)
+                .background(Color(nsColor: (isEditing ? tint : profile.tint).color).opacity(0.14), in: Circle())
+            if isEditing {
+                TextField("Profile name", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                Menu {
+                    ForEach(symbols, id: \.self) { option in
+                        Button { symbol = option } label: { Label(option, systemImage: option) }
+                    }
+                } label: {
+                    Image(systemName: "face.smiling")
+                }
+                .menuStyle(.borderlessButton)
+                .help("Change icon")
+                Menu {
+                    ForEach(ProfileTint.allCases, id: \.self) { option in
+                        Button { tint = option } label: {
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(Color(nsColor: option.color))
+                                    .frame(width: 12, height: 12)
+                                Text(option.rawValue.capitalized)
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "circle.fill").foregroundStyle(Color(nsColor: tint.color))
+                }
+                .menuStyle(.borderlessButton)
+                .help("Change color")
+                Button { save() } label: { Image(systemName: "checkmark") }
+                    .buttonStyle(.borderless)
+                    .pointerCursor()
+                    .help("Save profile")
+                Button { cancel() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless)
+                    .pointerCursor()
+                    .help("Cancel")
+                if canDelete {
+                    Button(role: .destructive) { store.deleteProfile(profile.id) } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .pointerCursor()
+                    .help("Delete profile")
+                }
+            } else {
+                Text(profile.name)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                Spacer()
+                Button { isEditing = true } label: { Image(systemName: "pencil") }
+                    .buttonStyle(.borderless)
+                    .pointerCursor()
+                    .help("Edit profile")
+                    .opacity(isHovering ? 1 : 0)
+                    .allowsHitTesting(isHovering)
+            }
+        }
+        .onHover { isHovering = $0 }
+    }
+
+    private func save() {
+        store.updateProfile(profile.id, name: name, symbol: symbol, tint: tint)
+        isEditing = false
+    }
+
+    private func cancel() {
+        name = profile.name
+        symbol = profile.symbol
+        tint = profile.tint
+        isEditing = false
     }
 }

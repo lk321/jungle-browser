@@ -3,24 +3,44 @@ import SwiftUI
 
 struct WindowChromeConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        configureWhenAttached(view)
-        return view
+        WindowChromeView(frame: .zero)
     }
 
     func updateNSView(_ view: NSView, context: Context) {
-        configureWhenAttached(view)
+    }
+}
+
+private final class WindowChromeView: NSView {
+    private var visibilityObserver: NSObjectProtocol?
+    private var trafficLightsVisible = true
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        Self.configure(window, trafficLightsVisible: trafficLightsVisible)
+        visibilityObserver = NotificationCenter.default.addObserver(
+            forName: .jungleTrafficLightsVisibility,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self, let isVisible = notification.userInfo?["isVisible"] as? Bool, let window = self.window else { return }
+            self.trafficLightsVisible = isVisible
+            Self.configure(window, trafficLightsVisible: isVisible)
+        }
     }
 
-    private func configureWhenAttached(_ view: NSView) {
-        DispatchQueue.main.async {
-            guard let window = view.window else { return }
-            window.styleMask.insert(.fullSizeContentView)
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.standardWindowButton(.closeButton)?.isHidden = false
-            window.standardWindowButton(.miniaturizeButton)?.isHidden = false
-            window.standardWindowButton(.zoomButton)?.isHidden = false
+    deinit {
+        if let visibilityObserver {
+            NotificationCenter.default.removeObserver(visibilityObserver)
         }
+    }
+
+    static func configure(_ window: NSWindow, trafficLightsVisible: Bool) {
+        window.styleMask.insert(.fullSizeContentView)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.standardWindowButton(.closeButton)?.isHidden = !trafficLightsVisible
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = !trafficLightsVisible
+        window.standardWindowButton(.zoomButton)?.isHidden = !trafficLightsVisible
     }
 }
