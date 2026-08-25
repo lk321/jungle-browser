@@ -20,6 +20,7 @@ final class WebViewPool {
         configuration.preferences.setValue(true, forKey: "allowsPictureInPictureMediaPlayback")
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
         configuration.userContentController.addUserScript(Self.mediaScript)
+        ContentBlocking.shared.install(on: configuration.userContentController)
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
@@ -47,6 +48,14 @@ final class WebViewPool {
     }
 
     func contains(_ tabID: UUID) -> Bool { webViews[tabID] != nil }
+
+    func applyContentRuleLists(_ lists: [WKContentRuleList]) {
+        webViews.values.forEach { webView in
+            let controller = webView.configuration.userContentController
+            controller.removeAllContentRuleLists()
+            lists.forEach(controller.add(_:))
+        }
+    }
 
     func takeSnapshot(of tabID: UUID, completion: @escaping (NSImage?) -> Void) {
         guard let webView = webViews[tabID] else { completion(nil); return }

@@ -1,4 +1,5 @@
 import XCTest
+import WebKit
 @testable import jungle
 
 final class JungleTests: XCTestCase {
@@ -124,5 +125,36 @@ final class JungleTests: XCTestCase {
 
     func testResolveRejectsBlankAddress() {
         XCTAssertNil(BrowserAddress.resolve("  "))
+    }
+
+    func testContentRuleCompilerTranslatesHostRulesAndExceptions() throws {
+        let source = """
+        ||ads.example.com^$script,third-party
+        @@||ads.example.com^$domain=trusted.example
+        /not-a-host-rule/
+        """
+
+        let json = ContentBlockerRuleCompiler.compile(source)
+        let rules = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+
+        XCTAssertEqual(rules.count, 2)
+        XCTAssertEqual((rules[0]["action"] as? [String: Any])?["type"] as? String, "block")
+        XCTAssertEqual((rules[0]["trigger"] as? [String: Any])?["resource-type"] as? [String], ["script"])
+        XCTAssertEqual((rules[0]["trigger"] as? [String: Any])?["load-type"] as? [String], ["third-party"])
+        XCTAssertEqual((rules[1]["action"] as? [String: Any])?["type"] as? String, "ignore-previous-rules")
+        XCTAssertEqual((rules[1]["trigger"] as? [String: Any])?["if-domain"] as? [String], ["trusted.example"])
+    }
+
+    @MainActor
+    func testGeneratedContentRulesCompileInWebKit() async throws {
+        let source = ContentBlockerRuleCompiler.compile("||tracker.example^$third-party,script")
+        let store = try XCTUnwrap(WKContentRuleListStore.default())
+        let identifier = "jungle.tests.\(UUID().uuidString)"
+        defer { Task { try? await store.removeContentRuleList(forIdentifier: identifier) } }
+
+        let compiled = try await store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: source)
+        let list = try XCTUnwrap(compiled)
+
+        XCTAssertEqual(list.identifier, identifier)
     }
 }

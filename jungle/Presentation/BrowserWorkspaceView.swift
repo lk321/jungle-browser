@@ -41,6 +41,7 @@ struct BrowserWorkspaceView: View {
         .task {
             addressInput = store.selectedTab?.address.absoluteString ?? ""
             store.beginMemoryHousekeeping()
+            ContentBlocking.shared.start()
             publishTrafficLightsVisibility()
         }
         .onChange(of: store.isSidebarVisible) { _, _ in publishTrafficLightsVisibility() }
