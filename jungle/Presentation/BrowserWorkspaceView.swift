@@ -6,6 +6,10 @@ struct BrowserWorkspaceView: View {
     @State private var addressInput = ""
 
     var body: some View {
+        workspaceWithKeyboardHandling
+    }
+
+    private var workspaceLayout: some View {
         ZStack {
             HStack(spacing: 0) {
                 if store.isSidebarVisible {
@@ -26,6 +30,10 @@ struct BrowserWorkspaceView: View {
                     .allowsHitTesting(false)
             }
         }
+    }
+
+    private var configuredWorkspaceLayout: some View {
+        workspaceLayout
         .frame(minWidth: 900, minHeight: 600)
         .preferredColorScheme(store.settings.appearance.colorScheme)
         .animation(.easeInOut(duration: 0.18), value: store.isSidebarVisible)
@@ -39,6 +47,10 @@ struct BrowserWorkspaceView: View {
         .onChange(of: store.selectedTabID) { _, _ in
             addressInput = store.selectedTab?.address.absoluteString ?? ""
         }
+    }
+
+    private var workspaceWithNotifications: some View {
+        configuredWorkspaceLayout
         .onReceive(NotificationCenter.default.publisher(for: .jungleNewTab)) { _ in store.createTab() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleCommandPalette)) { _ in
             store.isCommandPalettePresented = true
@@ -49,26 +61,31 @@ struct BrowserWorkspaceView: View {
         .onReceive(NotificationCenter.default.publisher(for: .jungleGoBack)) { _ in store.goBack() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleGoForward)) { _ in store.goForward() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleReload)) { _ in store.reloadSelectedTab() }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleCycleTabs)) { _ in store.cycleTabs() }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleToggleSidebar)) { _ in store.toggleSidebar() }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleMoveTab)) { notification in
-            guard let offset = notification.userInfo?["offset"] as? Int else { return }
-            store.moveSelectedTabHorizontally(by: offset)
+        .onReceive(NotificationCenter.default.publisher(for: .jungleBeginTabCycle)) { _ in
+            store.selectPreviouslySelectedTab(keepsPreviewVisible: true)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleAdvanceTabCycle)) { _ in
+            store.moveSelectedTabHorizontally(by: 1, keepsPreviewVisible: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleSelectPreviousTab)) { _ in
+            store.selectPreviouslySelectedTab()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleMoveTabWhileCycling)) { notification in
+            guard let offset = notification.userInfo?["offset"] as? Int else { return }
+            store.moveSelectedTabHorizontally(by: offset, keepsPreviewVisible: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleDismissTabCycle)) { _ in store.dismissTabPreview() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleToggleSidebar)) { _ in store.toggleSidebar() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleSwitchProfile)) { notification in
             guard let number = notification.userInfo?["number"] as? Int else { return }
             store.switchProfile(number: number)
         }
-        .onKeyPress(.return) {
-            guard store.tabPreviewID != nil else { return .ignored }
-            store.dismissTabPreview()
-            return .handled
-        }
-        .onKeyPress(.escape) {
-            guard store.tabPreviewID != nil else { return .ignored }
-            store.dismissTabPreview()
-            return .handled
-        }
+    }
+
+    private var workspaceWithKeyboardHandling: some View {
+        workspaceWithNotifications
+        .onKeyPress(.return, action: dismissTabPreviewIfPresented)
+        .onKeyPress(.escape, action: dismissTabPreviewIfPresented)
         .sheet(isPresented: $store.isCommandPalettePresented) { CommandPalette(store: store) }
         .sheet(isPresented: $store.isSettingsPresented) { BrowserSettingsView(settings: store.settings, store: store) }
     }
@@ -102,6 +119,13 @@ struct BrowserWorkspaceView: View {
             userInfo: ["isVisible": store.isSidebarVisible]
         )
     }
+
+    private func dismissTabPreviewIfPresented() -> KeyPress.Result {
+        guard store.tabPreviewID != nil else { return .ignored }
+        store.dismissTabPreview()
+        return .handled
+    }
+
 }
 
 private struct SidebarSurface: View {
@@ -147,25 +171,21 @@ private struct TabNavigationPreview: View {
                 Image(systemName: "rectangle.3.group.fill").foregroundStyle(.green)
                 Text("Open tabs").font(.system(size: 15, weight: .bold, design: .rounded))
                 Spacer()
-                Text("↵ to keep")
+                Text("Release ⌃ to keep")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
-                Text("⌥⌘← →").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Text("⌃⇥ or ⌃←/→ to cycle").font(.caption.weight(.medium)).foregroundStyle(.secondary)
             }
-            HStack(spacing: 8) {
-                ForEach(tabs.prefix(5)) { item in
-                    VStack(alignment: .leading, spacing: 6) {
-                        TabFavicon(address: item.address, isSuspended: item.isSuspended, isPinned: item.isPinned)
-                            .frame(width: 20, height: 20)
-                        Text(item.title).lineLimit(1).font(.caption.weight(item.id == tab.id ? .semibold : .regular))
-                    }
-                    .frame(width: 140, height: 88, alignment: .leading)
-                    .padding(10)
-                    .background(item.id == tab.id ? Color.green.opacity(0.22) : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 13))
-                    .overlay(RoundedRectangle(cornerRadius: 13).stroke(item.id == tab.id ? Color.green.opacity(0.42) : .white.opacity(0.10)))
-                    .scaleEffect(item.id == tab.id ? 1 : 0.96)
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 150, maximum: 180), spacing: 8)],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                ForEach(tabs) { item in
+                    TabNavigationCard(tab: item, isSelected: item.id == tab.id)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Text(tab.address.host ?? tab.address.absoluteString)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -177,6 +197,26 @@ private struct TabNavigationPreview: View {
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.22)))
         .shadow(radius: 22, y: 10)
         .padding(28)
+    }
+}
+
+private struct TabNavigationCard: View {
+    let tab: BrowserTab
+    let isSelected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TabFavicon(address: tab.address, isSuspended: tab.isSuspended, isPinned: tab.isPinned)
+                .frame(width: 20, height: 20)
+            Text(tab.title)
+                .lineLimit(1)
+                .font(.caption.weight(isSelected ? .semibold : .regular))
+        }
+        .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
+        .padding(10)
+        .background(isSelected ? Color.green.opacity(0.22) : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 13))
+        .overlay(RoundedRectangle(cornerRadius: 13).stroke(isSelected ? Color.green.opacity(0.42) : .white.opacity(0.10)))
+        .scaleEffect(isSelected ? 1 : 0.96)
     }
 }
 
@@ -692,7 +732,9 @@ private struct CommandPalette: View {
                 command("Back", symbol: "chevron.left", shortcut: "⌘[") { store.goBack() }
                 command("Forward", symbol: "chevron.right", shortcut: "⌘]") { store.goForward() }
                 command("Reload page", symbol: "arrow.clockwise", shortcut: "⌘R") { store.reloadSelectedTab() }
-                command("Cycle open tabs", symbol: "rectangle.3.group", shortcut: "⌥⌘⇥") { store.cycleTabs() }
+                command("Cycle open tabs", symbol: "rectangle.3.group", shortcut: "⌃⇥") {
+                    store.selectPreviouslySelectedTab()
+                }
                 command("Toggle tab pin", symbol: "pin", shortcut: "") {
                     if let tabID = store.selectedTabID { store.togglePinned(tabID) }
                 }

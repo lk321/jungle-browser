@@ -21,6 +21,7 @@ final class BrowserStore: ObservableObject {
     private var housekeepingTask: Task<Void, Never>?
     private var tabPreviewTask: Task<Void, Never>?
     private var settingsObserver: AnyCancellable?
+    private var previouslySelectedTabID: UUID?
 
     init(settings: BrowserSettings? = nil, persistence: BrowserPersistence? = nil) {
         let resolvedPersistence = persistence ?? BrowserPersistence.shared
@@ -69,8 +70,12 @@ final class BrowserStore: ObservableObject {
 
     func select(_ tabID: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let previousTabID = selectedTabID
         activeProfileID = tabs[index].profileID
         selectedTabID = tabID
+        if previousTabID != tabID {
+            previouslySelectedTabID = previousTabID
+        }
         tabs[index].lastActivatedAt = .now
         tabs[index].isSuspended = false
         persistWorkspace()
@@ -252,19 +257,25 @@ final class BrowserStore: ObservableObject {
         loadingTabIDs.remove(tabID)
     }
 
-    func cycleTabs() {
-        let candidates = visibleTabs.sorted { $0.lastActivatedAt > $1.lastActivatedAt }
-        guard let selectedTabID, let current = candidates.firstIndex(where: { $0.id == selectedTabID }), candidates.count > 1 else { return }
-        select(candidates[(current + 1) % candidates.count].id)
-        showTabPreview()
-    }
-
-    func moveSelectedTabHorizontally(by offset: Int) {
+    func moveSelectedTabHorizontally(by offset: Int, keepsPreviewVisible: Bool = false) {
         let candidates = visibleTabs
         guard let selectedTabID, let current = candidates.firstIndex(where: { $0.id == selectedTabID }), candidates.count > 1 else { return }
         let next = (current + offset + candidates.count) % candidates.count
         select(candidates[next].id)
-        showTabPreview()
+        showTabPreview(keepsVisible: keepsPreviewVisible)
+    }
+
+    func selectPreviouslySelectedTab(keepsPreviewVisible: Bool = false) {
+        guard let previouslySelectedTabID,
+              previouslySelectedTabID != selectedTabID,
+              visibleTabs.contains(where: { $0.id == previouslySelectedTabID })
+        else {
+            moveSelectedTabHorizontally(by: 1, keepsPreviewVisible: keepsPreviewVisible)
+            return
+        }
+
+        select(previouslySelectedTabID)
+        showTabPreview(keepsVisible: keepsPreviewVisible)
     }
 
     func dismissTabPreview() {
@@ -300,9 +311,10 @@ final class BrowserStore: ObservableObject {
         }
     }
 
-    private func showTabPreview() {
+    private func showTabPreview(keepsVisible: Bool = false) {
         tabPreviewID = selectedTabID
         tabPreviewTask?.cancel()
+        guard !keepsVisible else { return }
         tabPreviewTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(0.9))
             guard !Task.isCancelled else { return }

@@ -43,18 +43,10 @@ struct JungleApp: App {
                     NotificationCenter.default.post(name: .jungleOpenSettings, object: nil)
                 }
                 .keyboardShortcut(",", modifiers: .command)
-                Button("Next Open Tab") {
-                    NotificationCenter.default.post(name: .jungleCycleTabs, object: nil)
+                Button("Previous Open Tab") {
+                    NotificationCenter.default.post(name: .jungleSelectPreviousTab, object: nil)
                 }
-                .keyboardShortcut(.tab, modifiers: [.command, .option])
-                Button("Next Tab") {
-                    NotificationCenter.default.post(name: .jungleMoveTab, object: nil, userInfo: ["offset": 1])
-                }
-                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
-                Button("Previous Tab") {
-                    NotificationCenter.default.post(name: .jungleMoveTab, object: nil, userInfo: ["offset": -1])
-                }
-                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .keyboardShortcut(.tab, modifiers: .control)
                 Button("Toggle Sidebar") {
                     NotificationCenter.default.post(name: .jungleToggleSidebar, object: nil)
                 }
@@ -73,8 +65,11 @@ struct JungleApp: App {
 extension Notification.Name {
     static let jungleNewTab = Notification.Name("jungle.new-tab")
     static let jungleCommandPalette = Notification.Name("jungle.command-palette")
-    static let jungleCycleTabs = Notification.Name("jungle.cycle-tabs")
-    static let jungleMoveTab = Notification.Name("jungle.move-tab")
+    static let jungleBeginTabCycle = Notification.Name("jungle.begin-tab-cycle")
+    static let jungleAdvanceTabCycle = Notification.Name("jungle.advance-tab-cycle")
+    static let jungleMoveTabWhileCycling = Notification.Name("jungle.move-tab-while-cycling")
+    static let jungleDismissTabCycle = Notification.Name("jungle.dismiss-tab-cycle")
+    static let jungleSelectPreviousTab = Notification.Name("jungle.select-previous-tab")
     static let jungleToggleSidebar = Notification.Name("jungle.toggle-sidebar")
     static let jungleSwitchProfile = Notification.Name("jungle.switch-profile")
     static let jungleTrafficLightsVisibility = Notification.Name("jungle.traffic-lights-visibility")
