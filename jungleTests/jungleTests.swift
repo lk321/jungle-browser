@@ -53,6 +53,30 @@ final class JungleTests: XCTestCase {
     }
 
     @MainActor
+    func testOpeningBookmarkCreatesAndSelectsNewTab() {
+        let store = BrowserStore()
+        let previousTabID = store.selectedTabID
+        let previousTabCount = store.tabs.count
+        let bookmark = BrowserBookmark(
+            title: "Example",
+            address: URL(string: "https://example.com") ?? BrowserAddress.home
+        )
+        defer {
+            store.closeSelectedTab()
+            if let previousTabID {
+                store.select(previousTabID)
+            }
+        }
+
+        store.openBookmark(bookmark)
+
+        XCTAssertEqual(store.tabs.count, previousTabCount + 1)
+        XCTAssertNotEqual(store.selectedTabID, previousTabID)
+        XCTAssertEqual(store.selectedTab?.address, bookmark.address)
+        XCTAssertEqual(store.selectedTab?.title, bookmark.title)
+    }
+
+    @MainActor
     func testCyclesTabsInVisualOrderWhileControlIsHeld() {
         let store = BrowserStore()
         store.createTab()

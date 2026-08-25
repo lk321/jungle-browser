@@ -174,6 +174,19 @@ private struct TabNavigationPreview: View {
     let tab: BrowserTab
     let tabs: [BrowserTab]
 
+    private let cardWidth: CGFloat = 172
+    private let cardSpacing: CGFloat = 8
+
+    private var columnCount: Int { min(max(tabs.count, 1), 4) }
+
+    private var gridColumns: [GridItem] {
+        Array(repeating: GridItem(.fixed(cardWidth), spacing: cardSpacing), count: columnCount)
+    }
+
+    private var contentWidth: CGFloat {
+        max(CGFloat(columnCount) * cardWidth + CGFloat(columnCount - 1) * cardSpacing, 352)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -186,22 +199,21 @@ private struct TabNavigationPreview: View {
                 Text("⌃⇥ or ⌃←/→ to cycle").font(.caption.weight(.medium)).foregroundStyle(.secondary)
             }
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 150, maximum: 180), spacing: 8)],
+                columns: gridColumns,
                 alignment: .leading,
-                spacing: 8
+                spacing: cardSpacing
             ) {
                 ForEach(tabs) { item in
                     TabNavigationCard(tab: item, isSelected: item.id == tab.id)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             Text(tab.address.host ?? tab.address.absoluteString)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
+        .frame(width: contentWidth, alignment: .leading)
         .padding(16)
-        .frame(maxWidth: 760)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.22)))
         .shadow(radius: 22, y: 10)
@@ -383,7 +395,6 @@ private struct BrowserSidebar: View {
 
     private var quickAccess: some View {
         VStack(alignment: .leading, spacing: 8) {
-            let links = store.bookmarkFolders.first(where: \.isQuickAccess)?.bookmarks.prefix(3) ?? []
             HStack {
                 sidebarLabel("QUICK ACCESS")
                 Spacer()
@@ -405,8 +416,8 @@ private struct BrowserSidebar: View {
                 .accessibilityLabel("Quick Access options")
                 .pointerCursor()
             }
-            HStack(spacing: 7) {
-                ForEach(Array(links)) { bookmark in
+            LazyVGrid(columns: quickAccessGridColumns, spacing: 7) {
+                ForEach(quickAccessBookmarks) { bookmark in
                     Button { store.openBookmark(bookmark) } label: {
                         TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
                             .frame(width: 20, height: 20)
@@ -429,6 +440,24 @@ private struct BrowserSidebar: View {
             }
         }
         .padding(.horizontal, 12)
+    }
+
+    private var quickAccessBookmarks: [BrowserBookmark] {
+        Array(store.bookmarkFolders.first(where: \.isQuickAccess)?.bookmarks.prefix(6) ?? [])
+    }
+
+    private var quickAccessGridColumns: [GridItem] {
+        let count = quickAccessBookmarks.count
+        let columnCount: Int
+        switch count {
+        case 0:
+            columnCount = 1
+        case 1...3:
+            columnCount = count
+        default:
+            columnCount = (count + 1) / 2
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: 7), count: columnCount)
     }
 
     private func bookmarkFolder(_ folder: BookmarkFolder) -> some View {
@@ -558,33 +587,7 @@ private struct BrowserSidebar: View {
     }
 
     private func tabRow(_ tab: BrowserTab) -> some View {
-        HStack(spacing: 8) {
-            TabFavicon(address: tab.address, isSuspended: tab.isSuspended, isPinned: tab.isPinned)
-                .frame(width: 14, height: 14)
-            Text(tab.title)
-                .lineLimit(1)
-                .font(.system(size: 12.5, weight: tab.id == store.selectedTabID ? .medium : .regular, design: .rounded))
-            Spacer(minLength: 0)
-            Button { store.close(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
-                .buttonStyle(.plain)
-                .pointerCursor()
-                .opacity(tab.id == store.selectedTabID ? 0.7 : 0)
-                .accessibilityLabel("Close \(tab.title)")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .contentShape(Rectangle())
-        .background(tab.id == store.selectedTabID ? Color.green.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 9))
-        .interactiveHover(cornerRadius: 9)
-        .onTapGesture { store.select(tab.id) }
-        .contextMenu {
-            Button(tab.isPinned ? "Unpin tab" : "Pin tab") { store.togglePinned(tab.id) }
-            Menu("Save page to folder") {
-                ForEach(store.bookmarkFolders) { folder in
-                    Button(folder.name) { store.saveCurrentPage(to: folder.id) }
-                }
-            }
-        }
+        SidebarTabRow(store: store, tab: tab)
     }
 
     private func chromeButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
@@ -600,6 +603,51 @@ private struct BrowserSidebar: View {
         isAddressFocused = false
     }
 
+}
+
+private struct SidebarTabRow: View {
+    @ObservedObject var store: BrowserStore
+    let tab: BrowserTab
+    @State private var isHovering = false
+    @FocusState private var isFocused: Bool
+
+    private var showsCloseButton: Bool {
+        tab.id == store.selectedTabID || isHovering || isFocused
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TabFavicon(address: tab.address, isSuspended: tab.isSuspended, isPinned: tab.isPinned)
+                .frame(width: 14, height: 14)
+            Text(tab.title)
+                .lineLimit(1)
+                .font(.system(size: 12.5, weight: tab.id == store.selectedTabID ? .medium : .regular, design: .rounded))
+            Spacer(minLength: 0)
+            Button { store.close(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
+                .buttonStyle(.plain)
+                .pointerCursor()
+                .opacity(showsCloseButton ? 0.7 : 0)
+                .allowsHitTesting(showsCloseButton)
+                .accessibilityLabel("Close \(tab.title)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .background(tab.id == store.selectedTabID ? Color.green.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 9))
+        .interactiveHover(cornerRadius: 9)
+        .onTapGesture { store.select(tab.id) }
+        .focusable()
+        .focused($isFocused)
+        .onHover { isHovering = $0 }
+        .contextMenu {
+            Button(tab.isPinned ? "Unpin tab" : "Pin tab") { store.togglePinned(tab.id) }
+            Menu("Save page to folder") {
+                ForEach(store.bookmarkFolders) { folder in
+                    Button(folder.name) { store.saveCurrentPage(to: folder.id) }
+                }
+            }
+        }
+    }
 }
 
 private struct TabFavicon: View {

@@ -206,7 +206,13 @@ final class BrowserStore: ObservableObject {
     }
 
     func openBookmark(_ bookmark: BrowserBookmark) {
-        navigate(to: bookmark.address.absoluteString)
+        let tab = BrowserTab(
+            profileID: activeProfileID,
+            address: bookmark.address,
+            title: bookmark.title
+        )
+        tabs.append(tab)
+        select(tab.id)
     }
 
     func addressSuggestions(for input: String) -> [AddressSuggestion] {
