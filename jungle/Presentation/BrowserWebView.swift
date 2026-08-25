@@ -27,15 +27,16 @@ struct BrowserWebView: NSViewRepresentable {
         let webView = WebViewPool.shared.webView(for: tab, profile: profile)
         webView.navigationDelegate = coordinator
         coordinator.observeLoading(of: webView)
-        guard webView.superview !== container else { return }
-        webView.removeFromSuperview()
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(webView)
+        let hostView = WebViewPool.shared.hostView(for: tab, profile: profile)
+        guard hostView.superview !== container else { return }
+        hostView.removeFromSuperview()
+        hostView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(hostView)
         NSLayoutConstraint.activate([
-            webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            webView.topAnchor.constraint(equalTo: container.topAnchor),
-            webView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            hostView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            hostView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            hostView.topAnchor.constraint(equalTo: container.topAnchor),
+            hostView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
     }
 

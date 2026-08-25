@@ -5,6 +5,7 @@ import WebKit
 final class WebViewPool {
     static let shared = WebViewPool()
     private var webViews: [UUID: WKWebView] = [:]
+    private var hostViews: [UUID: NSView] = [:]
 
     private init() {}
 
@@ -26,6 +27,23 @@ final class WebViewPool {
         webView.isInspectable = true
         webViews[tab.id] = webView
         return webView
+    }
+
+    /// The view a tab keeps for as long as it lives. WebKit docks the Web Inspector beside
+    /// the web view inside its superview, so that superview has to outlive the container
+    /// SwiftUI rebuilds on every tab switch — otherwise the docked inspector is left behind
+    /// in the discarded container and the page keeps the shrunken frame it had.
+    func hostView(for tab: BrowserTab, profile: BrowserProfile) -> NSView {
+        if let hostView = hostViews[tab.id] { return hostView }
+
+        let webView = webView(for: tab, profile: profile)
+        let hostView = NSView()
+        webView.translatesAutoresizingMaskIntoConstraints = true
+        webView.frame = hostView.bounds
+        webView.autoresizingMask = [.width, .height]
+        hostView.addSubview(webView)
+        hostViews[tab.id] = hostView
+        return hostView
     }
 
     func contains(_ tabID: UUID) -> Bool { webViews[tabID] != nil }
@@ -64,6 +82,7 @@ final class WebViewPool {
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
         webView.removeFromSuperview()
+        hostViews.removeValue(forKey: tabID)?.removeFromSuperview()
     }
 
     private func evaluate(_ script: String, in tabID: UUID) {

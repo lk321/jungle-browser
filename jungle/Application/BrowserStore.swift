@@ -341,6 +341,8 @@ final class BrowserStore: ObservableObject {
         let candidates = Self.idleTabs(in: tabs, cutoff: cutoff, selectedTabID: selectedTabID)
             .filter { WebViewPool.shared.contains($0.id) }
         for tab in candidates {
+            // An open Web Inspector session dies with the web process it inspects.
+            if let webView = loadedWebView(for: tab), WebInspector.isConnected(for: webView) { continue }
             WebViewPool.shared.holdsPlayback(tab.id) { [weak self] holdsPlayback in
                 Task { @MainActor in
                     // A tab playing media or holding a Picture in Picture window keeps its process.

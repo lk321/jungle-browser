@@ -24,6 +24,12 @@ enum WebInspector {
         send("showConsole", to: inspector)
     }
 
+    /// True while an inspector session is attached to the page, docked or in its own window.
+    static func isConnected(for webView: WKWebView) -> Bool {
+        guard let inspector = inspector(for: webView) else { return false }
+        return flag("connected", on: inspector)
+    }
+
     private static func show(_ inspector: NSObject) {
         if !flag("connected", on: inspector) { send("connect", to: inspector) }
         send("show", to: inspector)
