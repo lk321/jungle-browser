@@ -27,6 +27,32 @@ final class JungleTests: XCTestCase {
     }
 
     @MainActor
+    func testIdleTabsExcludeSelectedPinnedAndRecentTabs() {
+        let profileID = UUID()
+        let cutoff = Date.now
+        let idle = BrowserTab(profileID: profileID, lastActivatedAt: cutoff.addingTimeInterval(-60))
+        let selected = BrowserTab(profileID: profileID, lastActivatedAt: cutoff.addingTimeInterval(-60))
+        let pinned = BrowserTab(profileID: profileID, lastActivatedAt: cutoff.addingTimeInterval(-60), isPinned: true)
+        let recent = BrowserTab(profileID: profileID, lastActivatedAt: cutoff.addingTimeInterval(60))
+
+        let candidates = BrowserStore.idleTabs(in: [idle, selected, pinned, recent], cutoff: cutoff, selectedTabID: selected.id)
+
+        XCTAssertEqual(candidates.map(\.id), [idle.id])
+    }
+
+    @MainActor
+    func testClosesSelectedTab() {
+        let store = BrowserStore()
+        store.createTab()
+        let closedTabID = store.selectedTabID
+
+        store.closeSelectedTab()
+
+        XCTAssertFalse(store.tabs.contains(where: { $0.id == closedTabID }))
+        XCTAssertNotEqual(store.selectedTabID, closedTabID)
+    }
+
+    @MainActor
     func testCyclesTabsInVisualOrderWhileControlIsHeld() {
         let store = BrowserStore()
         store.createTab()

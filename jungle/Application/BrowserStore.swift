@@ -71,6 +71,11 @@ final class BrowserStore: ObservableObject {
     func select(_ tabID: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         let previousTabID = selectedTabID
+        // Leaving a tab that is playing video sends it to Picture in Picture, the way
+        // Safari does. The floating window keeps its own control to return it inline.
+        if let previousTabID, previousTabID != tabID {
+            WebViewPool.shared.enterPictureInPicture(for: previousTabID)
+        }
         activeProfileID = tabs[index].profileID
         selectedTabID = tabID
         if previousTabID != tabID {
@@ -98,6 +103,11 @@ final class BrowserStore: ObservableObject {
             activeProfileID = profileID
             createTab()
         }
+    }
+
+    func closeSelectedTab() {
+        guard let selectedTabID else { return }
+        close(selectedTabID)
     }
 
     func switchProfile(to profileID: UUID) {
@@ -172,6 +182,23 @@ final class BrowserStore: ObservableObject {
     }
 
     func reloadSelectedTab() { loadedWebView(for: selectedTab)?.reload() }
+    func reloadSelectedTabIgnoringCache() { loadedWebView(for: selectedTab)?.reloadFromOrigin() }
+
+    func togglePictureInPicture() {
+        guard let selectedTabID else { return }
+        WebViewPool.shared.togglePictureInPicture(for: selectedTabID)
+    }
+
+    func toggleWebInspector() {
+        guard let webView = loadedWebView(for: selectedTab) else { return }
+        WebInspector.toggle(for: webView)
+    }
+
+    func showJavaScriptConsole() {
+        guard let webView = loadedWebView(for: selectedTab) else { return }
+        WebInspector.showConsole(for: webView)
+    }
+
     func stopLoadingSelectedTab() {
         guard let tabID = selectedTabID else { return }
         loadedWebView(for: selectedTab)?.stopLoading()
@@ -241,11 +268,11 @@ final class BrowserStore: ObservableObject {
     func didCommitNavigation(for tabID: UUID, url: URL?) { if let url { update(tabID) { $0.address = url } } }
 
     func didStartNavigation(for tabID: UUID) {
-        loadingTabIDs.insert(tabID)
+        setNavigationLoading(true, for: tabID)
     }
 
     func didFinishNavigation(for tabID: UUID, title: String?, url: URL?) {
-        loadingTabIDs.remove(tabID)
+        setNavigationLoading(false, for: tabID)
         update(tabID) { tab in
             if let url { tab.address = url }
             let candidate = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -254,7 +281,16 @@ final class BrowserStore: ObservableObject {
     }
 
     func didFailNavigation(for tabID: UUID) {
-        loadingTabIDs.remove(tabID)
+        setNavigationLoading(false, for: tabID)
+    }
+
+    func setNavigationLoading(_ isLoading: Bool, for tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        if isLoading {
+            loadingTabIDs.insert(tabID)
+        } else {
+            loadingTabIDs.remove(tabID)
+        }
     }
 
     func moveSelectedTabHorizontally(by offset: Int, keepsPreviewVisible: Bool = false) {
@@ -294,19 +330,36 @@ final class BrowserStore: ObservableObject {
         return WebViewPool.shared.webView(for: tab, profile: profile)
     }
 
+    static func idleTabs(in tabs: [BrowserTab], cutoff: Date, selectedTabID: UUID?) -> [BrowserTab] {
+        tabs.filter { tab in
+            tab.id != selectedTabID && !tab.isPinned && !tab.isSuspended && tab.lastActivatedAt < cutoff
+        }
+    }
+
     private func discardIdleTabs() {
         let cutoff = Date.now.addingTimeInterval(-settings.tabSleepInterval)
-        let candidates = tabs.filter { tab in
-            tab.id != selectedTabID && !tab.isPinned && !tab.isSuspended && tab.lastActivatedAt < cutoff && WebViewPool.shared.contains(tab.id)
-        }
+        let candidates = Self.idleTabs(in: tabs, cutoff: cutoff, selectedTabID: selectedTabID)
+            .filter { WebViewPool.shared.contains($0.id) }
         for tab in candidates {
-            update(tab.id) { $0.isSuspended = true }
-            WebViewPool.shared.takeSnapshot(of: tab.id) { [weak self] image in
+            WebViewPool.shared.holdsPlayback(tab.id) { [weak self] holdsPlayback in
                 Task { @MainActor in
-                    guard self?.tabs.first(where: { $0.id == tab.id })?.isSuspended == true else { return }
-                    self?.update(tab.id) { $0.preview = image }
-                    WebViewPool.shared.discard(tab.id)
+                    // A tab playing media or holding a Picture in Picture window keeps its process.
+                    guard !holdsPlayback else { return }
+                    self?.suspend(tab.id)
                 }
+            }
+        }
+    }
+
+    private func suspend(_ tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID && !$0.isSuspended }) else { return }
+        update(tabID) { $0.isSuspended = true }
+        loadingTabIDs.remove(tabID)
+        WebViewPool.shared.takeSnapshot(of: tabID) { [weak self] image in
+            Task { @MainActor in
+                guard self?.tabs.first(where: { $0.id == tabID })?.isSuspended == true else { return }
+                self?.update(tabID) { $0.preview = image }
+                WebViewPool.shared.discard(tabID)
             }
         }
     }

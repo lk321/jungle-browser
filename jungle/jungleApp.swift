@@ -23,6 +23,10 @@ struct JungleApp: App {
                     NotificationCenter.default.post(name: .jungleNewTab, object: nil)
                 }
                 .keyboardShortcut("t", modifiers: .command)
+                Button("Close Tab") {
+                    NotificationCenter.default.post(name: .jungleCloseTab, object: nil)
+                }
+                .keyboardShortcut("w", modifiers: .command)
                 Button("Back") {
                     NotificationCenter.default.post(name: .jungleGoBack, object: nil)
                 }
@@ -35,6 +39,10 @@ struct JungleApp: App {
                     NotificationCenter.default.post(name: .jungleReload, object: nil)
                 }
                 .keyboardShortcut("r", modifiers: .command)
+                Button("Toggle Picture in Picture") {
+                    NotificationCenter.default.post(name: .jungleTogglePictureInPicture, object: nil)
+                }
+                .keyboardShortcut("p", modifiers: [.command, .option])
                 Button("Open Command Palette") {
                     NotificationCenter.default.post(name: .jungleCommandPalette, object: nil)
                 }
@@ -58,12 +66,27 @@ struct JungleApp: App {
                     .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .control)
                 }
             }
+            CommandMenu("Develop") {
+                Button("Show Web Inspector") {
+                    NotificationCenter.default.post(name: .jungleToggleWebInspector, object: nil)
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                Button("Show JavaScript Console") {
+                    NotificationCenter.default.post(name: .jungleShowJavaScriptConsole, object: nil)
+                }
+                .keyboardShortcut("c", modifiers: [.command, .option])
+                Button("Reload Ignoring Cache") {
+                    NotificationCenter.default.post(name: .jungleReloadIgnoringCache, object: nil)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option])
+            }
         }
     }
 }
 
 extension Notification.Name {
     static let jungleNewTab = Notification.Name("jungle.new-tab")
+    static let jungleCloseTab = Notification.Name("jungle.close-tab")
     static let jungleCommandPalette = Notification.Name("jungle.command-palette")
     static let jungleBeginTabCycle = Notification.Name("jungle.begin-tab-cycle")
     static let jungleAdvanceTabCycle = Notification.Name("jungle.advance-tab-cycle")
@@ -77,4 +100,8 @@ extension Notification.Name {
     static let jungleGoBack = Notification.Name("jungle.go-back")
     static let jungleGoForward = Notification.Name("jungle.go-forward")
     static let jungleReload = Notification.Name("jungle.reload")
+    static let jungleReloadIgnoringCache = Notification.Name("jungle.reload-ignoring-cache")
+    static let jungleTogglePictureInPicture = Notification.Name("jungle.toggle-picture-in-picture")
+    static let jungleToggleWebInspector = Notification.Name("jungle.toggle-web-inspector")
+    static let jungleShowJavaScriptConsole = Notification.Name("jungle.show-javascript-console")
 }

@@ -26,6 +26,7 @@ struct BrowserWebView: NSViewRepresentable {
     private func attachWebView(to container: NSView, coordinator: Coordinator) {
         let webView = WebViewPool.shared.webView(for: tab, profile: profile)
         webView.navigationDelegate = coordinator
+        coordinator.observeLoading(of: webView)
         guard webView.superview !== container else { return }
         webView.removeFromSuperview()
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -41,10 +42,28 @@ struct BrowserWebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         let store: BrowserStore
         var tabID: UUID
+        private weak var observedWebView: WKWebView?
+        private var loadingObservation: NSKeyValueObservation?
 
         init(store: BrowserStore, tabID: UUID) {
             self.store = store
             self.tabID = tabID
+        }
+
+        deinit {
+            loadingObservation?.invalidate()
+        }
+
+        func observeLoading(of webView: WKWebView) {
+            guard observedWebView !== webView else { return }
+            loadingObservation?.invalidate()
+            observedWebView = webView
+            loadingObservation = webView.observe(\WKWebView.isLoading, options: [.initial, .new]) { [weak self, weak webView] _, _ in
+                Task { @MainActor [weak self, weak webView] in
+                    guard let self, let webView else { return }
+                    self.store.setNavigationLoading(webView.isLoading, for: self.tabID)
+                }
+            }
         }
 
         func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
@@ -64,6 +83,10 @@ struct BrowserWebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            store.didFailNavigation(for: tabID)
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             store.didFailNavigation(for: tabID)
         }
     }

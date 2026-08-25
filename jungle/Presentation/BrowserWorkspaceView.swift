@@ -52,6 +52,7 @@ struct BrowserWorkspaceView: View {
     private var workspaceWithNotifications: some View {
         configuredWorkspaceLayout
         .onReceive(NotificationCenter.default.publisher(for: .jungleNewTab)) { _ in store.createTab() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleCloseTab)) { _ in store.closeSelectedTab() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleCommandPalette)) { _ in
             store.isCommandPalettePresented = true
         }
@@ -82,8 +83,16 @@ struct BrowserWorkspaceView: View {
         }
     }
 
-    private var workspaceWithKeyboardHandling: some View {
+    private var workspaceWithMediaAndDeveloperCommands: some View {
         workspaceWithNotifications
+        .onReceive(NotificationCenter.default.publisher(for: .jungleReloadIgnoringCache)) { _ in store.reloadSelectedTabIgnoringCache() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleTogglePictureInPicture)) { _ in store.togglePictureInPicture() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleToggleWebInspector)) { _ in store.toggleWebInspector() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleShowJavaScriptConsole)) { _ in store.showJavaScriptConsole() }
+    }
+
+    private var workspaceWithKeyboardHandling: some View {
+        workspaceWithMediaAndDeveloperCommands
         .onKeyPress(.return, action: dismissTabPreviewIfPresented)
         .onKeyPress(.escape, action: dismissTabPreviewIfPresented)
         .sheet(isPresented: $store.isCommandPalettePresented) { CommandPalette(store: store) }
@@ -93,7 +102,7 @@ struct BrowserWorkspaceView: View {
     @ViewBuilder
     private var browserContent: some View {
         if let tab = store.selectedTab {
-            ZStack(alignment: .top) {
+            ZStack(alignment: .bottomTrailing) {
                 if tab.isSuspended {
                     SuspendedTabView(tab: tab, resume: { store.select(tab.id) })
                 } else {
@@ -103,8 +112,8 @@ struct BrowserWorkspaceView: View {
 
                 if store.isSelectedTabLoading {
                     NavigationFeedback(title: tab.address.host ?? "Loading page")
-                        .padding(.top, 14)
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .padding(18)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
