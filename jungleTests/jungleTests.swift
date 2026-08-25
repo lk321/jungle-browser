@@ -157,4 +157,9 @@ final class JungleTests: XCTestCase {
 
         XCTAssertEqual(list.identifier, identifier)
     }
+
+    func testContentBlockingUsesFallbackWhenAnyPrimarySourceIsUnavailable() {
+        XCTAssertTrue(ContentBlockingSourcePolicy.shouldUseFallback(primarySourcesAreUsable: [true, false]))
+        XCTAssertFalse(ContentBlockingSourcePolicy.shouldUseFallback(primarySourcesAreUsable: [true, true]))
+    }
 }

@@ -13,18 +13,26 @@ final class ContentBlocking {
     private struct Feed: Sendable {
         let key: String
         let url: URL
+        let maximumRuleCount: Int
 
-        init?(key: String, urlString: String) {
+        init?(key: String, urlString: String, maximumRuleCount: Int = 75_000) {
             guard let url = URL(string: urlString) else { return nil }
             self.key = key
             self.url = url
+            self.maximumRuleCount = maximumRuleCount
         }
     }
 
-    private static let feeds = [
+    private static let primaryFeeds = [
         Feed(key: "ads", urlString: "https://easylist.to/easylist/easylist.txt"),
         Feed(key: "privacy", urlString: "https://easylist.to/easylist/easyprivacy.txt")
     ].compactMap { $0 }
+    private static let fallbackFeed = Feed(
+        key: "fallback",
+        urlString: "https://cdn.jsdelivr.net/gh/badmojr/1Hosts@master/Lite/adblock.txt",
+        maximumRuleCount: 150_000
+    )
+    private static let maximumPrimaryStaleness: TimeInterval = 60 * 60 * 24 * 7
 
     private let store = WKContentRuleListStore.default()
     private let defaults = UserDefaults.standard
@@ -56,7 +64,7 @@ final class ContentBlocking {
     }
 
     private func restoreCachedLists() async {
-        for key in ["bootstrap"] + Self.feeds.map(\.key) {
+        for key in ["bootstrap"] + Self.primaryFeeds.map(\.key) + [Self.fallbackFeed?.key].compactMap({ $0 }) {
             guard let identifier = defaults.string(forKey: identifierKey(for: key)),
                   let list = await lookUp(identifier: identifier) else { continue }
             activeLists[key] = list
@@ -76,16 +84,43 @@ final class ContentBlocking {
     private func refreshIfDue() async {
         guard shouldRefresh else { return }
 
-        var didUpdate = false
-        for feed in Self.feeds {
-            didUpdate = await refresh(feed) || didUpdate
+        var didRefresh = false
+        for feed in Self.primaryFeeds {
+            let refreshed = await refresh(feed)
+            if refreshed {
+                defaults.set(Date.now, forKey: lastSuccessfulRefreshKey(for: feed.key))
+                didRefresh = true
+            }
         }
-        if didUpdate { defaults.set(Date.now, forKey: "contentBlocking.lastRefresh") }
+
+        let needsFallback = ContentBlockingSourcePolicy.shouldUseFallback(
+            primarySourcesAreUsable: Self.primaryFeeds.map(isUsable(_:))
+        )
+        if needsFallback, let fallbackFeed = Self.fallbackFeed {
+            let refreshed = await refresh(fallbackFeed)
+            if refreshed {
+                defaults.set(Date.now, forKey: lastSuccessfulRefreshKey(for: fallbackFeed.key))
+                didRefresh = true
+            }
+        } else {
+            deactivateList(key: "fallback")
+        }
+
+        if didRefresh { defaults.set(Date.now, forKey: "contentBlocking.lastRefresh") }
     }
 
     private var shouldRefresh: Bool {
+        guard Self.primaryFeeds.allSatisfy({ defaults.object(forKey: lastSuccessfulRefreshKey(for: $0.key)) as? Date != nil }) else {
+            return true
+        }
         guard let date = defaults.object(forKey: "contentBlocking.lastRefresh") as? Date else { return true }
         return Date.now.timeIntervalSince(date) >= 60 * 60 * 24
+    }
+
+    private func isUsable(_ feed: Feed) -> Bool {
+        guard activeLists[feed.key] != nil,
+              let date = defaults.object(forKey: lastSuccessfulRefreshKey(for: feed.key)) as? Date else { return false }
+        return Date.now.timeIntervalSince(date) <= Self.maximumPrimaryStaleness
     }
 
     private func refresh(_ feed: Feed) async -> Bool {
@@ -104,7 +139,7 @@ final class ContentBlocking {
                   let filters = String(data: data, encoding: .utf8) else { return false }
 
             let rules = await Task.detached(priority: .utility) {
-                ContentBlockerRuleCompiler.compile(filters)
+                ContentBlockerRuleCompiler.compile(filters, maximumRuleCount: feed.maximumRuleCount)
             }.value
             guard !rules.isEmpty else { return false }
             await compileAndActivate(rules, key: feed.key)
@@ -136,6 +171,14 @@ final class ContentBlocking {
         WebViewPool.shared.applyContentRuleLists(Array(activeLists.values))
     }
 
+    private func deactivateList(key: String) {
+        guard let list = activeLists.removeValue(forKey: key) else { return }
+        defaults.removeObject(forKey: identifierKey(for: key))
+        defaults.removeObject(forKey: lastSuccessfulRefreshKey(for: key))
+        applyActiveLists()
+        store?.removeContentRuleList(forIdentifier: list.identifier) { _ in }
+    }
+
     private func lookUp(identifier: String) async -> WKContentRuleList? {
         guard let store else { return nil }
         return await withCheckedContinuation { continuation in
@@ -156,6 +199,7 @@ final class ContentBlocking {
 
     private func identifierKey(for key: String) -> String { "contentBlocking.identifier.\(key)" }
     private func etagKey(for key: String) -> String { "contentBlocking.etag.\(key)" }
+    private func lastSuccessfulRefreshKey(for key: String) -> String { "contentBlocking.lastSuccessful.\(key)" }
 
     /// A small first-launch shield while the maintained lists download and compile.
     private static let bootstrapDomains = [
