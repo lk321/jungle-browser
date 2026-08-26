@@ -6,6 +6,6 @@ final class JungleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        XCTAssertTrue(app.staticTexts["Jungle"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Toggle sidebar"].waitForExistence(timeout: 3))
     }
 }

@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct BrowserWorkspaceView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var store = BrowserStore()
     @State private var addressInput = ""
 
@@ -20,7 +21,7 @@ struct BrowserWorkspaceView: View {
                 }
 
                 browserContent
-                .background(Color(nsColor: .windowBackgroundColor))
+                    .background(Color(nsColor: WebViewPool.contentBackground(isDark: colorScheme == .dark)))
             }
 
             if let previewID = store.tabPreviewID,
@@ -42,7 +43,14 @@ struct BrowserWorkspaceView: View {
             addressInput = store.selectedTab?.address.absoluteString ?? ""
             store.beginMemoryHousekeeping()
             ContentBlocking.shared.start()
+            ApplicationIconController.update(for: store.settings.appearance)
             publishTrafficLightsVisibility()
+        }
+        .onChange(of: store.settings.appearance) { _, appearance in
+            ApplicationIconController.update(for: appearance)
+        }
+        .onChange(of: colorScheme) { _, _ in
+            ApplicationIconController.update(for: store.settings.appearance)
         }
         .onChange(of: store.isSidebarVisible) { _, _ in publishTrafficLightsVisibility() }
         .onChange(of: store.selectedTabID) { _, _ in
@@ -88,6 +96,10 @@ struct BrowserWorkspaceView: View {
         workspaceWithNotifications
         .onReceive(NotificationCenter.default.publisher(for: .jungleReloadIgnoringCache)) { _ in store.reloadSelectedTabIgnoringCache() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleTogglePictureInPicture)) { _ in store.togglePictureInPicture() }
+        .onReceive(NotificationCenter.default.publisher(for: .junglePictureInPictureDidExit)) { notification in
+            guard let tabID = notification.userInfo?["tabID"] as? UUID else { return }
+            store.restoreTabFromPictureInPicture(tabID)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .jungleToggleWebInspector)) { _ in store.toggleWebInspector() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleShowJavaScriptConsole)) { _ in store.showJavaScriptConsole() }
     }
@@ -96,6 +108,7 @@ struct BrowserWorkspaceView: View {
         workspaceWithMediaAndDeveloperCommands
         .onKeyPress(.return, action: dismissTabPreviewIfPresented)
         .onKeyPress(.escape, action: dismissTabPreviewIfPresented)
+        .onOpenURL { store.openExternalURL($0) }
         .sheet(isPresented: $store.isCommandPalettePresented) { CommandPalette(store: store) }
         .sheet(isPresented: $store.isSettingsPresented) { BrowserSettingsView(settings: store.settings, store: store) }
     }
@@ -612,8 +625,12 @@ private struct SidebarTabRow: View {
     @State private var isHovering = false
     @FocusState private var isFocused: Bool
 
+    private var isSelected: Bool {
+        tab.id == store.selectedTabID
+    }
+
     private var showsCloseButton: Bool {
-        tab.id == store.selectedTabID || isHovering || isFocused
+        isSelected || isHovering || isFocused
     }
 
     var body: some View {
@@ -622,7 +639,7 @@ private struct SidebarTabRow: View {
                 .frame(width: 14, height: 14)
             Text(tab.title)
                 .lineLimit(1)
-                .font(.system(size: 12.5, weight: tab.id == store.selectedTabID ? .medium : .regular, design: .rounded))
+                .font(.system(size: 12.5, weight: isSelected ? .medium : .regular, design: .rounded))
             Spacer(minLength: 0)
             Button { store.close(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
                 .buttonStyle(.plain)
@@ -634,10 +651,23 @@ private struct SidebarTabRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .contentShape(Rectangle())
-        .background(tab.id == store.selectedTabID ? Color.green.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 9))
+        .background {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.green.opacity(0.11))
+                    .overlay(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.green.opacity(0.82))
+                            .frame(width: 3)
+                            .padding(.vertical, 6)
+                            .padding(.leading, 4)
+                    }
+            }
+        }
         .interactiveHover(cornerRadius: 9)
         .onTapGesture { store.select(tab.id) }
         .focusable()
+        .focusEffectDisabled()
         .focused($isFocused)
         .onHover { isHovering = $0 }
         .contextMenu {

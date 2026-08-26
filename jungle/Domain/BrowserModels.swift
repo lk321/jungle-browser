@@ -85,6 +85,13 @@ struct AddressSuggestion: Identifiable, Hashable {
 enum BrowserAddress {
     static let home = URL(string: "https://www.google.com") ?? URL(fileURLWithPath: "/")
 
+    static func isWebURL(_ url: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case "http", "https": true
+        default: false
+        }
+    }
+
     static func resolve(_ input: String, using searchEngine: BrowserSearchEngine = .google) -> URL? {
         let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return nil }

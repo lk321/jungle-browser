@@ -108,6 +108,47 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(store.tabPreviewID, previousTabID)
     }
 
+    @MainActor
+    func testReturningPictureInPictureSelectsItsSourceWithoutStartingAnotherPictureInPictureSession() {
+        let store = BrowserStore()
+        let pictureInPictureSourceID = store.selectedTabID
+        store.createTab()
+
+        guard let pictureInPictureSourceID else {
+            XCTFail("Expected an initial tab")
+            return
+        }
+
+        store.restoreTabFromPictureInPicture(pictureInPictureSourceID)
+
+        XCTAssertEqual(store.selectedTabID, pictureInPictureSourceID)
+    }
+
+    @MainActor
+    func testMediaScriptRequiresPlaybackBeforeEnteringPictureInPicture() {
+        let source = WebViewPool.mediaScript.source
+
+        XCTAssertTrue(source.contains("activeVideo.paused"))
+        XCTAssertFalse(source.contains("playingVideo() || document.querySelector('video')"))
+        XCTAssertTrue(source.contains("isPictureInPictureActive"))
+    }
+
+    @MainActor
+    func testDarkContentBackgroundIsNotWhite() {
+        let background = WebViewPool.contentBackground(isDark: true)
+        var white: CGFloat = 1
+
+        background.getWhite(&white, alpha: nil)
+        XCTAssertLessThan(white, 0.5)
+    }
+
+    func testRecognizesHTTPAndHTTPSExternalURLs() {
+        XCTAssertTrue(BrowserAddress.isWebURL(URL(string: "https://example.com") ?? BrowserAddress.home))
+        XCTAssertTrue(BrowserAddress.isWebURL(URL(string: "http://example.com") ?? BrowserAddress.home))
+        XCTAssertFalse(BrowserAddress.isWebURL(URL(string: "mailto:hello@example.com") ?? BrowserAddress.home))
+        XCTAssertFalse(BrowserAddress.isWebURL(URL(fileURLWithPath: "/tmp/example")))
+    }
+
     func testResolveUsesHTTPSForHostnames() {
         XCTAssertEqual(BrowserAddress.resolve("example.com")?.absoluteString, "https://example.com")
     }
@@ -125,6 +166,79 @@ final class JungleTests: XCTestCase {
 
     func testResolveRejectsBlankAddress() {
         XCTAssertNil(BrowserAddress.resolve("  "))
+    }
+
+    func testLinkPrewarmingOnlyAllowsSafeHTTPSDestinations() throws {
+        let secure = try XCTUnwrap(URL(string: "https://example.com/article"))
+        let insecure = try XCTUnwrap(URL(string: "http://example.com/article"))
+        let credentialed = try XCTUnwrap(URL(string: "https://user:password@example.com/article"))
+
+        XCTAssertTrue(LinkPrewarming.isEligibleDestination(secure))
+        XCTAssertFalse(LinkPrewarming.isEligibleDestination(insecure))
+        XCTAssertFalse(LinkPrewarming.isEligibleDestination(credentialed))
+    }
+
+    func testLinkPrewarmingOnlyWarmsOtherOrigins() throws {
+        let page = try XCTUnwrap(URL(string: "https://example.com/current"))
+        let sameOrigin = try XCTUnwrap(URL(string: "https://example.com/next"))
+        let sameOriginDefaultPort = try XCTUnwrap(URL(string: "https://example.com:443/next"))
+        let subdomain = try XCTUnwrap(URL(string: "https://cdn.example.com/asset"))
+        let alternatePort = try XCTUnwrap(URL(string: "https://example.com:8443/next"))
+
+        XCTAssertFalse(LinkPrewarming.isCrossOrigin(sameOrigin, from: page))
+        XCTAssertFalse(LinkPrewarming.isCrossOrigin(sameOriginDefaultPort, from: page))
+        XCTAssertTrue(LinkPrewarming.isCrossOrigin(subdomain, from: page))
+        XCTAssertTrue(LinkPrewarming.isCrossOrigin(alternatePort, from: page))
+    }
+
+    func testLinkPrewarmingScriptIsHoverDrivenAndBounded() {
+        let source = LinkPrewarming.scriptSource
+
+        XCTAssertTrue(source.contains("pointerover"))
+        XCTAssertTrue(source.contains("pointerdown"))
+        XCTAssertTrue(source.contains("MAXIMUM_PRECONNECTS = 2"))
+        XCTAssertTrue(source.contains("MAXIMUM_DNS_PREFETCHES = 6"))
+        XCTAssertTrue(source.contains("prefers-reduced-data"))
+    }
+
+    @MainActor
+    func testLinkPrewarmingRunsInsideWebKitOnLinkIntent() async throws {
+        let controller = WKUserContentController()
+        controller.addUserScript(LinkPrewarming.userScript)
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = controller
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<a id=\"destination\" href=\"https://developer.apple.com/documentation\">Documentation</a>",
+            baseURL: try XCTUnwrap(URL(string: "https://example.com/current"))
+        )
+
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        let result = try await webView.evaluateJavaScript(
+            """
+            (function () {
+                const anchor = document.getElementById('destination');
+                anchor.dispatchEvent(new PointerEvent('pointerdown', {
+                    bubbles: true,
+                    button: 0,
+                    pointerType: 'mouse'
+                }));
+                return Array.from(document.querySelectorAll('link[data-jungle-prewarm]'))
+                    .map(function (link) { return link.rel + ':' + link.href; })
+                    .sort()
+                    .join('|');
+            })();
+            """,
+            in: nil,
+            contentWorld: .defaultClient
+        ) as? String
+
+        XCTAssertEqual(
+            result,
+            "dns-prefetch:https://developer.apple.com/|preconnect:https://developer.apple.com/"
+        )
     }
 
     func testContentRuleCompilerTranslatesHostRulesAndExceptions() throws {
@@ -161,5 +275,14 @@ final class JungleTests: XCTestCase {
     func testContentBlockingUsesFallbackWhenAnyPrimarySourceIsUnavailable() {
         XCTAssertTrue(ContentBlockingSourcePolicy.shouldUseFallback(primarySourcesAreUsable: [true, false]))
         XCTAssertFalse(ContentBlockingSourcePolicy.shouldUseFallback(primarySourcesAreUsable: [true, true]))
+    }
+}
+
+@MainActor
+private final class NavigationCompletion: NSObject, WKNavigationDelegate {
+    let finished = XCTestExpectation(description: "Web view finished loading")
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        finished.fulfill()
     }
 }

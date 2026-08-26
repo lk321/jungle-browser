@@ -3,6 +3,7 @@ import SwiftUI
 import WebKit
 
 struct BrowserWebView: NSViewRepresentable {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var store: BrowserStore
     let tab: BrowserTab
     let profile: BrowserProfile
@@ -12,22 +13,25 @@ struct BrowserWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        applyContentBackground(to: container)
         attachWebView(to: container, coordinator: context.coordinator)
         return container
     }
 
     func updateNSView(_ container: NSView, context: Context) {
         context.coordinator.tabID = tab.id
+        applyContentBackground(to: container)
         attachWebView(to: container, coordinator: context.coordinator)
         store.loadSelectedTabIfNeeded()
     }
 
     private func attachWebView(to container: NSView, coordinator: Coordinator) {
-        let webView = WebViewPool.shared.webView(for: tab, profile: profile)
+        let isDark = colorScheme == .dark
+        let webView = WebViewPool.shared.webView(for: tab, profile: profile, isDark: isDark)
+        WebViewPool.shared.applyContentBackground(isDark: isDark, to: webView)
         webView.navigationDelegate = coordinator
         coordinator.observeLoading(of: webView)
-        let hostView = WebViewPool.shared.hostView(for: tab, profile: profile)
+        let hostView = WebViewPool.shared.hostView(for: tab, profile: profile, isDark: isDark)
         guard hostView.superview !== container else { return }
         hostView.removeFromSuperview()
         hostView.translatesAutoresizingMaskIntoConstraints = false
@@ -38,6 +42,11 @@ struct BrowserWebView: NSViewRepresentable {
             hostView.topAnchor.constraint(equalTo: container.topAnchor),
             hostView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
+    }
+
+    private func applyContentBackground(to container: NSView) {
+        container.appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
+        container.layer?.backgroundColor = WebViewPool.contentBackground(isDark: colorScheme == .dark).cgColor
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {

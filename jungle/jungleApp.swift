@@ -9,6 +9,10 @@ import SwiftUI
 
 @main
 struct JungleApp: App {
+    init() {
+        ApplicationIconController.update(for: .system)
+    }
+
     var body: some Scene {
         WindowGroup {
             BrowserWorkspaceView()
@@ -102,6 +106,7 @@ extension Notification.Name {
     static let jungleReload = Notification.Name("jungle.reload")
     static let jungleReloadIgnoringCache = Notification.Name("jungle.reload-ignoring-cache")
     static let jungleTogglePictureInPicture = Notification.Name("jungle.toggle-picture-in-picture")
+    static let junglePictureInPictureDidExit = Notification.Name("jungle.picture-in-picture-did-exit")
     static let jungleToggleWebInspector = Notification.Name("jungle.toggle-web-inspector")
     static let jungleShowJavaScriptConsole = Notification.Name("jungle.show-javascript-console")
 }

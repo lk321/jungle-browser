@@ -20,6 +20,9 @@ final class BrowserStore: ObservableObject {
     private let persistence: BrowserPersistence
     private var housekeepingTask: Task<Void, Never>?
     private var tabPreviewTask: Task<Void, Never>?
+    private var pictureInPictureActivationTask: Task<Void, Never>?
+    private var pictureInPictureMonitoringTask: Task<Void, Never>?
+    private var pictureInPictureTabID: UUID?
     private var settingsObserver: AnyCancellable?
     private var previouslySelectedTabID: UUID?
 
@@ -44,6 +47,8 @@ final class BrowserStore: ObservableObject {
     deinit {
         housekeepingTask?.cancel()
         tabPreviewTask?.cancel()
+        pictureInPictureActivationTask?.cancel()
+        pictureInPictureMonitoringTask?.cancel()
     }
 
     var activeProfile: BrowserProfile { profiles.first(where: { $0.id == activeProfileID }) ?? profiles[0] }
@@ -68,13 +73,13 @@ final class BrowserStore: ObservableObject {
         select(tab.id)
     }
 
-    func select(_ tabID: UUID) {
+    func select(_ tabID: UUID, entersPictureInPictureWhenLeaving: Bool = true) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         let previousTabID = selectedTabID
         // Leaving a tab that is playing video sends it to Picture in Picture, the way
         // Safari does. The floating window keeps its own control to return it inline.
-        if let previousTabID, previousTabID != tabID {
-            WebViewPool.shared.enterPictureInPicture(for: previousTabID)
+        if entersPictureInPictureWhenLeaving, let previousTabID, previousTabID != tabID {
+            requestPictureInPicture(for: previousTabID)
         }
         activeProfileID = tabs[index].profileID
         selectedTabID = tabID
@@ -181,12 +186,33 @@ final class BrowserStore: ObservableObject {
         loadSelectedTabIfNeeded(force: true)
     }
 
+    func openExternalURL(_ url: URL) {
+        guard BrowserAddress.isWebURL(url) else { return }
+        navigate(to: url.absoluteString)
+    }
+
     func reloadSelectedTab() { loadedWebView(for: selectedTab)?.reload() }
     func reloadSelectedTabIgnoringCache() { loadedWebView(for: selectedTab)?.reloadFromOrigin() }
 
     func togglePictureInPicture() {
-        guard let selectedTabID else { return }
-        WebViewPool.shared.togglePictureInPicture(for: selectedTabID)
+        guard let tabID = pictureInPictureTabID ?? selectedTabID else { return }
+        Task { [weak self] in
+            if await WebViewPool.shared.isPictureInPictureActive(for: tabID) {
+                guard await WebViewPool.shared.exitPictureInPicture(for: tabID) else { return }
+                self?.restoreTabFromPictureInPicture(tabID)
+                return
+            }
+
+            guard await WebViewPool.shared.enterPictureInPicture(for: tabID) else { return }
+            self?.beginPictureInPictureActivationTracking(for: tabID)
+        }
+    }
+
+    func restoreTabFromPictureInPicture(_ tabID: UUID) {
+        stopPictureInPictureTracking(for: tabID)
+        guard selectedTabID != tabID, tabs.contains(where: { $0.id == tabID }) else { return }
+        // Returning one PiP window inline must not put media from the current tab in PiP.
+        select(tabID, entersPictureInPictureWhenLeaving: false)
     }
 
     func toggleWebInspector() {
@@ -334,6 +360,58 @@ final class BrowserStore: ObservableObject {
     private func loadedWebView(for tab: BrowserTab?) -> WKWebView? {
         guard let tab, let profile = profiles.first(where: { $0.id == tab.profileID }), WebViewPool.shared.contains(tab.id) else { return nil }
         return WebViewPool.shared.webView(for: tab, profile: profile)
+    }
+
+    private func requestPictureInPicture(for tabID: UUID) {
+        pictureInPictureActivationTask?.cancel()
+        pictureInPictureActivationTask = Task { [weak self] in
+            guard await WebViewPool.shared.enterPictureInPicture(for: tabID), !Task.isCancelled else { return }
+            self?.beginPictureInPictureActivationTracking(for: tabID)
+        }
+    }
+
+    private func beginPictureInPictureActivationTracking(for tabID: UUID) {
+        pictureInPictureActivationTask?.cancel()
+        pictureInPictureTabID = tabID
+        pictureInPictureActivationTask = Task { [weak self] in
+            for _ in 0..<15 {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, let self, self.tabs.contains(where: { $0.id == tabID }) else { return }
+                if await WebViewPool.shared.isPictureInPictureActive(for: tabID) {
+                    self.startPictureInPictureMonitoring(for: tabID)
+                    return
+                }
+            }
+            self?.stopPictureInPictureTracking(for: tabID)
+        }
+    }
+
+    private func startPictureInPictureMonitoring(for tabID: UUID) {
+        pictureInPictureTabID = tabID
+        pictureInPictureMonitoringTask?.cancel()
+        pictureInPictureMonitoringTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, let self else { return }
+                guard self.tabs.contains(where: { $0.id == tabID }) else {
+                    self.stopPictureInPictureTracking(for: tabID)
+                    return
+                }
+                guard await WebViewPool.shared.isPictureInPictureActive(for: tabID) else {
+                    self.restoreTabFromPictureInPicture(tabID)
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopPictureInPictureTracking(for tabID: UUID) {
+        guard pictureInPictureTabID == tabID else { return }
+        pictureInPictureTabID = nil
+        pictureInPictureActivationTask?.cancel()
+        pictureInPictureActivationTask = nil
+        pictureInPictureMonitoringTask?.cancel()
+        pictureInPictureMonitoringTask = nil
     }
 
     static func idleTabs(in tabs: [BrowserTab], cutoff: Date, selectedTabID: UUID?) -> [BrowserTab] {

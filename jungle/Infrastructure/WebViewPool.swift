@@ -9,8 +9,11 @@ final class WebViewPool {
 
     private init() {}
 
-    func webView(for tab: BrowserTab, profile: BrowserProfile) -> WKWebView {
-        if let webView = webViews[tab.id] { return webView }
+    func webView(for tab: BrowserTab, profile: BrowserProfile, isDark: Bool? = nil) -> WKWebView {
+        if let webView = webViews[tab.id] {
+            if let isDark { applyContentBackground(isDark: isDark, to: webView) }
+            return webView
+        }
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: profile.dataStoreID)
@@ -19,10 +22,13 @@ final class WebViewPool {
         // switched off, and neither has a public setter. These two keys are the whole difference.
         configuration.preferences.setValue(true, forKey: "allowsPictureInPictureMediaPlayback")
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        configuration.userContentController.add(MediaMessageHandler(tabID: tab.id), contentWorld: .defaultClient, name: "jungleMedia")
         configuration.userContentController.addUserScript(Self.mediaScript)
+        configuration.userContentController.addUserScript(LinkPrewarming.userScript)
         ContentBlocking.shared.install(on: configuration.userContentController)
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        applyContentBackground(isDark: isDark ?? systemAppearanceIsDark, to: webView)
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
         webView.allowsBackForwardNavigationGestures = true
         webView.isInspectable = true
@@ -34,11 +40,14 @@ final class WebViewPool {
     /// the web view inside its superview, so that superview has to outlive the container
     /// SwiftUI rebuilds on every tab switch — otherwise the docked inspector is left behind
     /// in the discarded container and the page keeps the shrunken frame it had.
-    func hostView(for tab: BrowserTab, profile: BrowserProfile) -> NSView {
+    func hostView(for tab: BrowserTab, profile: BrowserProfile, isDark: Bool? = nil) -> NSView {
         if let hostView = hostViews[tab.id] { return hostView }
 
-        let webView = webView(for: tab, profile: profile)
+        let effectiveIsDark = isDark ?? systemAppearanceIsDark
+        let webView = webView(for: tab, profile: profile, isDark: effectiveIsDark)
         let hostView = NSView()
+        hostView.wantsLayer = true
+        hostView.layer?.backgroundColor = Self.contentBackground(isDark: effectiveIsDark).cgColor
         webView.translatesAutoresizingMaskIntoConstraints = true
         webView.frame = hostView.bounds
         webView.autoresizingMask = [.width, .height]
@@ -62,12 +71,32 @@ final class WebViewPool {
         webView.takeSnapshot(with: nil) { image, _ in completion(image) }
     }
 
-    func enterPictureInPicture(for tabID: UUID) {
-        evaluate("__jungleMedia.enterPictureInPicture()", in: tabID)
+    func enterPictureInPicture(for tabID: UUID) async -> Bool {
+        await evaluateBoolean("__jungleMedia.enterPictureInPicture()", in: tabID)
     }
 
-    func togglePictureInPicture(for tabID: UUID) {
-        evaluate("__jungleMedia.togglePictureInPicture()", in: tabID)
+    func exitPictureInPicture(for tabID: UUID) async -> Bool {
+        await evaluateBoolean("__jungleMedia.exitPictureInPicture()", in: tabID)
+    }
+
+    func isPictureInPictureActive(for tabID: UUID) async -> Bool {
+        await evaluateBoolean("__jungleMedia.isPictureInPictureActive()", in: tabID)
+    }
+
+    func applyContentBackground(isDark: Bool, to webView: WKWebView) {
+        let backgroundColor = Self.contentBackground(isDark: isDark)
+        webView.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+        webView.underPageBackgroundColor = backgroundColor
+        webView.wantsLayer = true
+        webView.layer?.backgroundColor = backgroundColor.cgColor
+    }
+
+    static func contentBackground(isDark: Bool) -> NSColor {
+        isDark ? NSColor(calibratedWhite: 0.12, alpha: 1) : .windowBackgroundColor
+    }
+
+    private var systemAppearanceIsDark: Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
     /// Reports whether the tab still plays media or holds a Picture in Picture window,
@@ -99,13 +128,22 @@ final class WebViewPool {
         webView.evaluateJavaScript(script, in: nil, in: .defaultClient) { _ in }
     }
 
+    private func evaluateBoolean(_ script: String, in tabID: UUID) async -> Bool {
+        guard let webView = webViews[tabID] else { return false }
+        do {
+            return (try await webView.evaluateJavaScript(script, in: nil, contentWorld: .defaultClient) as? Bool) ?? false
+        } catch {
+            return false
+        }
+    }
+
     /// Tracks the video the page is playing and exposes the presentation-mode calls the
     /// app drives from AppKit. Lives in the client content world so pages cannot see it.
     ///
     /// ponytail: main frame only, which covers YouTube and every site that plays in the
     /// page itself. Videos inside a cross-origin iframe need per-frame evaluation; add it
     /// when a site that matters actually needs it.
-    private static let mediaScript = WKUserScript(
+    static let mediaScript = WKUserScript(
         source: """
         (function () {
             let activeVideo = null;
@@ -122,8 +160,18 @@ final class WebViewPool {
                 }
             }, true);
 
+            document.addEventListener('webkitpresentationmodechanged', function (event) {
+                const video = event.target;
+                if (!(video instanceof HTMLVideoElement)) { return; }
+                if (video.webkitPresentationMode === 'inline') {
+                    window.webkit.messageHandlers.jungleMedia.postMessage({
+                        type: 'pictureInPictureDidExit'
+                    });
+                }
+            }, true);
+
             function playingVideo() {
-                if (!activeVideo || !activeVideo.isConnected || activeVideo.ended) { return null; }
+                if (!activeVideo || activeVideo.paused || !activeVideo.isConnected || activeVideo.ended) { return null; }
                 if (typeof activeVideo.webkitSetPresentationMode !== 'function') { return null; }
                 if (!activeVideo.webkitSupportsPresentationMode('picture-in-picture')) { return null; }
                 return activeVideo;
@@ -151,11 +199,13 @@ final class WebViewPool {
                 },
                 togglePictureInPicture: function () {
                     if (this.exitPictureInPicture()) { return true; }
-                    const video = playingVideo() || document.querySelector('video');
-                    if (!video || typeof video.webkitSetPresentationMode !== 'function') { return false; }
-                    if (!video.webkitSupportsPresentationMode('picture-in-picture')) { return false; }
+                    const video = playingVideo();
+                    if (!video) { return false; }
                     video.webkitSetPresentationMode('picture-in-picture');
                     return true;
+                },
+                isPictureInPictureActive: function () {
+                    return pictureInPictureVideo() !== null;
                 },
                 holdsPlayback: function () {
                     return Array.prototype.some.call(
@@ -173,4 +223,21 @@ final class WebViewPool {
         forMainFrameOnly: true,
         in: .defaultClient
     )
+}
+
+private final class MediaMessageHandler: NSObject, WKScriptMessageHandler {
+    private let tabID: UUID
+
+    init(tabID: UUID) {
+        self.tabID = tabID
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], body["type"] as? String == "pictureInPictureDidExit" else { return }
+        NotificationCenter.default.post(
+            name: .junglePictureInPictureDidExit,
+            object: nil,
+            userInfo: ["tabID": tabID]
+        )
+    }
 }
