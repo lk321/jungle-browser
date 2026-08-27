@@ -4,6 +4,7 @@ struct BrowserSettingsView: View {
     @ObservedObject var settings: BrowserSettings
     @ObservedObject var store: BrowserStore
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var defaultBrowserController = DefaultBrowserController()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -34,6 +35,38 @@ struct BrowserSettingsView: View {
                 .pickerStyle(.segmented)
             }
 
+            settingsSection("DEFAULT BROWSER") {
+                HStack(spacing: 10) {
+                    Image(systemName: defaultBrowserController.isDefaultBrowser ? "checkmark.circle.fill" : "safari")
+                        .foregroundStyle(defaultBrowserController.isDefaultBrowser ? Color.green : Color.secondary)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(defaultBrowserController.isDefaultBrowser ? "Jungle is your default browser" : "Use Jungle as your default browser")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                        Text("Opens web links from other apps in Jungle.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    Button(defaultBrowserController.isDefaultBrowser ? "Default" : "Make default") {
+                        defaultBrowserController.makeDefaultBrowser()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(defaultBrowserController.isDefaultBrowser ? .gray : .green)
+                    .disabled(defaultBrowserController.isDefaultBrowser || defaultBrowserController.isUpdating)
+                }
+                if defaultBrowserController.isUpdating {
+                    ProgressView("Updating default browser…")
+                        .controlSize(.small)
+                }
+                if let failureDescription = defaultBrowserController.failureDescription {
+                    Text(failureDescription)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             settingsSection("MEMORY") {
                 Picker("Suspend inactive tabs after", selection: $settings.tabSleepInterval) {
                     Text("30 seconds").tag(TimeInterval(30))
@@ -62,6 +95,7 @@ struct BrowserSettingsView: View {
         .frame(width: 386, alignment: .leading)
         .padding(22)
         .background(.regularMaterial)
+        .onAppear { defaultBrowserController.refresh() }
     }
 
     private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

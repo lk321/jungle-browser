@@ -34,15 +34,31 @@ struct JungleApp: App {
                 Button("Back") {
                     NotificationCenter.default.post(name: .jungleGoBack, object: nil)
                 }
-                .keyboardShortcut("[", modifiers: .command)
+                .keyboardShortcut(.leftArrow, modifiers: .command)
                 Button("Forward") {
                     NotificationCenter.default.post(name: .jungleGoForward, object: nil)
                 }
-                .keyboardShortcut("]", modifiers: .command)
+                .keyboardShortcut(.rightArrow, modifiers: .command)
+                Button("Copy Active Tab URL") {
+                    NotificationCenter.default.post(name: .jungleCopyActiveTabURL, object: nil)
+                }
+                .keyboardShortcut("c", modifiers: [.command, .shift])
                 Button("Reload") {
                     NotificationCenter.default.post(name: .jungleReload, object: nil)
                 }
                 .keyboardShortcut("r", modifiers: .command)
+                Button("Reload Ignoring Cache") {
+                    NotificationCenter.default.post(name: .jungleReloadIgnoringCache, object: nil)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                Button("History") {
+                    NotificationCenter.default.post(name: .jungleShowHistory, object: nil)
+                }
+                .keyboardShortcut("j", modifiers: .command)
+                Button("Downloads") {
+                    NotificationCenter.default.post(name: .jungleShowDownloads, object: nil)
+                }
+                .keyboardShortcut("y", modifiers: .command)
                 Button("Toggle Picture in Picture") {
                     NotificationCenter.default.post(name: .jungleTogglePictureInPicture, object: nil)
                 }
@@ -101,8 +117,11 @@ extension Notification.Name {
     static let jungleSwitchProfile = Notification.Name("jungle.switch-profile")
     static let jungleTrafficLightsVisibility = Notification.Name("jungle.traffic-lights-visibility")
     static let jungleOpenSettings = Notification.Name("jungle.open-settings")
+    static let jungleShowHistory = Notification.Name("jungle.show-history")
+    static let jungleShowDownloads = Notification.Name("jungle.show-downloads")
     static let jungleGoBack = Notification.Name("jungle.go-back")
     static let jungleGoForward = Notification.Name("jungle.go-forward")
+    static let jungleCopyActiveTabURL = Notification.Name("jungle.copy-active-tab-url")
     static let jungleReload = Notification.Name("jungle.reload")
     static let jungleReloadIgnoringCache = Notification.Name("jungle.reload-ignoring-cache")
     static let jungleTogglePictureInPicture = Notification.Name("jungle.toggle-picture-in-picture")

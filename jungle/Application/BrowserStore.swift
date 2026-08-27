@@ -11,20 +11,27 @@ final class BrowserStore: ObservableObject {
     @Published var activeProfileID: UUID
     @Published var isCommandPalettePresented = false
     @Published var isSettingsPresented = false
+    @Published var isHistoryPresented = false
+    @Published var isDownloadsPresented = false
     @Published var isSidebarVisible = true
     @Published private(set) var tabPreviewID: UUID?
     @Published private(set) var loadingTabIDs: Set<UUID> = []
+    @Published private(set) var copiedTabAddress: URL?
     @Published private(set) var bookmarkFolders: [BookmarkFolder]
+    @Published private(set) var history: [BrowsingHistoryEntry]
+    @Published private(set) var downloads: [BrowserDownload]
 
     let settings: BrowserSettings
     private let persistence: BrowserPersistence
     private var housekeepingTask: Task<Void, Never>?
     private var tabPreviewTask: Task<Void, Never>?
+    private var copiedAddressFeedbackTask: Task<Void, Never>?
     private var pictureInPictureActivationTask: Task<Void, Never>?
     private var pictureInPictureMonitoringTask: Task<Void, Never>?
     private var pictureInPictureTabID: UUID?
     private var settingsObserver: AnyCancellable?
     private var previouslySelectedTabID: UUID?
+    private var lastRequestedAddresses: [UUID: URL] = [:]
 
     init(settings: BrowserSettings? = nil, persistence: BrowserPersistence? = nil) {
         let resolvedPersistence = persistence ?? BrowserPersistence.shared
@@ -38,7 +45,9 @@ final class BrowserStore: ObservableObject {
         tabs = workspace?.tabs ?? [firstTab]
         activeProfileID = browserProfiles[workspace?.activeProfileSlot ?? 0].id
         selectedTabID = workspace?.selectedTabID ?? firstTab.id
-        bookmarkFolders = resolvedPersistence.loadBookmarks()
+        bookmarkFolders = resolvedPersistence.loadBookmarks(for: browserProfiles)
+        history = resolvedPersistence.loadHistory()
+        downloads = resolvedPersistence.loadDownloads()
         settingsObserver = browserSettings.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -47,6 +56,7 @@ final class BrowserStore: ObservableObject {
     deinit {
         housekeepingTask?.cancel()
         tabPreviewTask?.cancel()
+        copiedAddressFeedbackTask?.cancel()
         pictureInPictureActivationTask?.cancel()
         pictureInPictureMonitoringTask?.cancel()
     }
@@ -54,7 +64,11 @@ final class BrowserStore: ObservableObject {
     var activeProfile: BrowserProfile { profiles.first(where: { $0.id == activeProfileID }) ?? profiles[0] }
     var selectedTab: BrowserTab? { tabs.first(where: { $0.id == selectedTabID }) }
     var visibleTabs: [BrowserTab] { tabs.filter { $0.profileID == activeProfileID } }
+    var visibleHistory: [BrowsingHistoryEntry] { history.filter { $0.profileID == activeProfileID } }
+    var visibleDownloads: [BrowserDownload] { downloads.filter { $0.profileID == activeProfileID } }
+    var visibleBookmarkFolders: [BookmarkFolder] { bookmarkFolders.filter { $0.profileID == activeProfileID } }
     var isSelectedTabLoading: Bool { selectedTabID.map { loadingTabIDs.contains($0) } ?? false }
+    var selectedTabUsesInsecureHTTP: Bool { selectedTab.map { BrowserAddress.usesInsecureHTTP($0.address) } ?? false }
 
     func beginMemoryHousekeeping() {
         guard housekeepingTask == nil else { return }
@@ -97,6 +111,7 @@ final class BrowserStore: ObservableObject {
         let wasSelected = selectedTabID == tabID
         tabs.remove(at: index)
         loadingTabIDs.remove(tabID)
+        lastRequestedAddresses.removeValue(forKey: tabID)
         WebViewPool.shared.discard(tabID)
         guard wasSelected else {
             persistWorkspace()
@@ -134,7 +149,9 @@ final class BrowserStore: ObservableObject {
         let tint = ProfileTint.allCases[profiles.count % ProfileTint.allCases.count]
         let profile = BrowserProfile(name: "Profile \(profiles.count + 1)", symbol: "person.crop.circle", tint: tint)
         profiles.append(profile)
+        bookmarkFolders.append(contentsOf: BookmarkFolder.defaults(for: profile.id))
         persistProfiles()
+        persistBookmarks()
         switchProfile(to: profile.id)
     }
 
@@ -154,8 +171,12 @@ final class BrowserStore: ObservableObject {
     func deleteProfile(_ profileID: UUID) {
         guard profiles.count > 1, let index = profiles.firstIndex(where: { $0.id == profileID }) else { return }
         let removedTabs = tabs.filter { $0.profileID == profileID }
-        removedTabs.forEach { WebViewPool.shared.discard($0.id) }
+        removedTabs.forEach {
+            lastRequestedAddresses.removeValue(forKey: $0.id)
+            WebViewPool.shared.discard($0.id)
+        }
         tabs.removeAll { $0.profileID == profileID }
+        bookmarkFolders.removeAll { $0.profileID == profileID }
         profiles.remove(at: index)
         if activeProfileID == profileID {
             activeProfileID = profiles[0].id
@@ -168,6 +189,7 @@ final class BrowserStore: ObservableObject {
             selectedTabID = tabs.first(where: { $0.profileID == activeProfileID })?.id
         }
         persistProfiles()
+        persistBookmarks()
         persistWorkspace()
     }
 
@@ -241,6 +263,98 @@ final class BrowserStore: ObservableObject {
         select(tab.id)
     }
 
+    func openLinkInNewTab(_ address: URL, from sourceTabID: UUID) {
+        guard BrowserAddress.isWebURL(address),
+              let sourceTab = tabs.first(where: { $0.id == sourceTabID })
+        else { return }
+        let tab = BrowserTab(
+            profileID: sourceTab.profileID,
+            address: address,
+            title: address.host ?? address.absoluteString
+        )
+        tabs.append(tab)
+        select(tab.id)
+    }
+
+    func openHistoryEntry(_ entry: BrowsingHistoryEntry) {
+        guard entry.profileID == activeProfileID else { return }
+        navigate(to: entry.address.absoluteString)
+    }
+
+    func openHistoryEntryInNewTab(_ entry: BrowsingHistoryEntry) {
+        guard entry.profileID == activeProfileID else { return }
+        let tab = BrowserTab(profileID: activeProfileID, address: entry.address, title: entry.title)
+        tabs.append(tab)
+        select(tab.id)
+    }
+
+    func deleteHistoryEntry(_ entryID: UUID) {
+        history.removeAll { $0.id == entryID }
+        persistence.deleteHistoryEntry(entryID)
+    }
+
+    func clearHistory() {
+        history.removeAll { $0.profileID == activeProfileID }
+        persistence.deleteHistory(for: activeProfileID)
+    }
+
+    func beginDownload(for tabID: UUID, sourceAddress: URL, suggestedFileName: String? = nil) -> UUID {
+        let profileID = tabs.first(where: { $0.id == tabID })?.profileID ?? activeProfileID
+        let suggestedName = suggestedFileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fileName = suggestedName.isEmpty ? sourceAddress.lastPathComponent : suggestedName
+        let download = BrowserDownload(
+            profileID: profileID,
+            sourceAddress: sourceAddress,
+            fileName: fileName.isEmpty ? "Download" : fileName
+        )
+        downloads.insert(download, at: 0)
+        persistence.saveDownload(download)
+        return download.id
+    }
+
+    func prepareDownloadDestination(for downloadID: UUID, suggestedFileName: String, expectedBytes: Int64?) -> URL? {
+        guard let index = downloads.firstIndex(where: { $0.id == downloadID }) else { return nil }
+        let fileName = sanitizedFileName(suggestedFileName)
+        guard let downloadsDirectory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return nil }
+        let destination = availableDestination(for: fileName, in: downloadsDirectory)
+        downloads[index].fileName = destination.lastPathComponent
+        downloads[index].destination = destination
+        downloads[index].expectedBytes = expectedBytes.flatMap { $0 > 0 ? $0 : nil }
+        persistence.saveDownload(downloads[index])
+        return destination
+    }
+
+    func recordDownloadData(_ byteCount: Int64, for downloadID: UUID) {
+        guard let index = downloads.firstIndex(where: { $0.id == downloadID }) else { return }
+        downloads[index].receivedBytes += byteCount
+    }
+
+    func finishDownload(_ downloadID: UUID) {
+        guard let index = downloads.firstIndex(where: { $0.id == downloadID }) else { return }
+        downloads[index].state = .completed
+        downloads[index].completedAt = .now
+        downloads[index].failureDescription = nil
+        persistence.saveDownload(downloads[index])
+    }
+
+    func failDownload(_ downloadID: UUID, errorDescription: String) {
+        guard let index = downloads.firstIndex(where: { $0.id == downloadID }) else { return }
+        downloads[index].state = .failed
+        downloads[index].completedAt = .now
+        downloads[index].failureDescription = errorDescription
+        persistence.saveDownload(downloads[index])
+    }
+
+    func deleteDownload(_ downloadID: UUID) {
+        downloads.removeAll { $0.id == downloadID }
+        persistence.deleteDownload(downloadID)
+    }
+
+    func clearDownloads() {
+        downloads.removeAll { $0.profileID == activeProfileID }
+        persistence.deleteDownloads(for: activeProfileID)
+    }
+
     func addressSuggestions(for input: String) -> [AddressSuggestion] {
         let query = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard query.count >= 2 else { return [] }
@@ -262,7 +376,8 @@ final class BrowserStore: ObservableObject {
     }
 
     func saveCurrentPage(to folderID: UUID) {
-        guard let tab = selectedTab, let index = bookmarkFolders.firstIndex(where: { $0.id == folderID }) else { return }
+        guard let tab = selectedTab,
+              let index = bookmarkFolders.firstIndex(where: { $0.id == folderID && $0.profileID == activeProfileID }) else { return }
         guard !bookmarkFolders[index].bookmarks.contains(where: { $0.address == tab.address }) else { return }
         let bookmark = BrowserBookmark(title: tab.title, address: tab.address, symbol: bookmarkSymbol(for: tab.address))
         bookmarkFolders[index].bookmarks.append(bookmark)
@@ -272,29 +387,56 @@ final class BrowserStore: ObservableObject {
     func createBookmarkFolder(named name: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return }
-        bookmarkFolders.append(BookmarkFolder(name: trimmedName))
+        bookmarkFolders.append(BookmarkFolder(profileID: activeProfileID, name: trimmedName))
         persistBookmarks()
     }
 
     func deleteBookmark(_ bookmarkID: UUID, from folderID: UUID) {
-        guard let index = bookmarkFolders.firstIndex(where: { $0.id == folderID }) else { return }
+        guard let index = bookmarkFolders.firstIndex(where: { $0.id == folderID && $0.profileID == activeProfileID }) else { return }
         bookmarkFolders[index].bookmarks.removeAll { $0.id == bookmarkID }
         persistBookmarks()
     }
 
     func deleteFolder(_ folderID: UUID) {
-        guard let index = bookmarkFolders.firstIndex(where: { $0.id == folderID }) else { return }
+        guard let index = bookmarkFolders.firstIndex(where: { $0.id == folderID && $0.profileID == activeProfileID }) else { return }
         bookmarkFolders.remove(at: index)
         persistBookmarks()
     }
 
     func toggleFolder(_ folderID: UUID) {
-        guard let index = bookmarkFolders.firstIndex(where: { $0.id == folderID }) else { return }
+        guard let index = bookmarkFolders.firstIndex(where: { $0.id == folderID && $0.profileID == activeProfileID }) else { return }
         bookmarkFolders[index].isExpanded.toggle()
         persistBookmarks()
     }
     func goBack() { if let view = loadedWebView(for: selectedTab), view.canGoBack { view.goBack() } }
     func goForward() { if let view = loadedWebView(for: selectedTab), view.canGoForward { view.goForward() } }
+    func copySelectedTabAddress() {
+        guard let address = selectedTab?.address else { return }
+        NSPasteboard.general.clearContents()
+        guard NSPasteboard.general.setString(address.absoluteString, forType: .string) else { return }
+        copiedTabAddress = address
+        copiedAddressFeedbackTask?.cancel()
+        copiedAddressFeedbackTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.copiedTabAddress = nil
+        }
+    }
+
+    static func commandClickDestination(
+        navigationType: WKNavigationType,
+        modifierFlags: NSEvent.ModifierFlags,
+        shouldPerformDownload: Bool,
+        requestURL: URL?
+    ) -> URL? {
+        guard navigationType == .linkActivated,
+              modifierFlags.contains(.command),
+              !shouldPerformDownload,
+              let requestURL,
+              BrowserAddress.isWebURL(requestURL)
+        else { return nil }
+        return requestURL
+    }
     func togglePinned(_ tabID: UUID) { update(tabID) { $0.isPinned.toggle() } }
 
     func didCommitNavigation(for tabID: UUID, url: URL?) { if let url { update(tabID) { $0.address = url } } }
@@ -310,10 +452,19 @@ final class BrowserStore: ObservableObject {
             let candidate = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             tab.title = candidate.isEmpty ? (tab.address.host ?? tab.address.absoluteString) : candidate
         }
+        guard let tab = tabs.first(where: { $0.id == tabID }), BrowserAddress.isWebURL(tab.address) else { return }
+        let entry = BrowsingHistoryEntry(profileID: tab.profileID, title: tab.title, address: tab.address)
+        history.insert(entry, at: 0)
+        persistence.saveHistoryEntry(entry)
     }
 
     func didFailNavigation(for tabID: UUID) {
         setNavigationLoading(false, for: tabID)
+    }
+
+    func didTerminateWebContent(for tabID: UUID) {
+        setNavigationLoading(false, for: tabID)
+        lastRequestedAddresses.removeValue(forKey: tabID)
     }
 
     func setNavigationLoading(_ isLoading: Bool, for tabID: UUID) {
@@ -354,7 +505,10 @@ final class BrowserStore: ObservableObject {
     func loadSelectedTabIfNeeded(force: Bool = false) {
         guard let tab = selectedTab, let profile = profiles.first(where: { $0.id == tab.profileID }) else { return }
         let webView = WebViewPool.shared.webView(for: tab, profile: profile)
-        if force || webView.url == nil || tab.isSuspended { webView.load(URLRequest(url: tab.address)) }
+        let needsInitialLoad = webView.url == nil && lastRequestedAddresses[tab.id] != tab.address
+        guard force || needsInitialLoad || tab.isSuspended else { return }
+        lastRequestedAddresses[tab.id] = tab.address
+        webView.load(URLRequest(url: tab.address))
     }
 
     private func loadedWebView(for tab: BrowserTab?) -> WKWebView? {
@@ -441,6 +595,7 @@ final class BrowserStore: ObservableObject {
         guard tabs.contains(where: { $0.id == tabID && !$0.isSuspended }) else { return }
         update(tabID) { $0.isSuspended = true }
         loadingTabIDs.remove(tabID)
+        lastRequestedAddresses.removeValue(forKey: tabID)
         WebViewPool.shared.takeSnapshot(of: tabID) { [weak self] image in
             Task { @MainActor in
                 guard self?.tabs.first(where: { $0.id == tabID })?.isSuspended == true else { return }
@@ -494,5 +649,26 @@ final class BrowserStore: ObservableObject {
         if title.hasPrefix(query) || host.hasPrefix(query) { return 3 }
         if suggestion.source == .tab { return 2 }
         return 1
+    }
+
+    private func sanitizedFileName(_ proposedName: String) -> String {
+        let fileName = URL(fileURLWithPath: proposedName).lastPathComponent
+        let trimmedName = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedName.isEmpty ? "Download" : trimmedName
+    }
+
+    private func availableDestination(for fileName: String, in directory: URL) -> URL {
+        let fileManager = FileManager.default
+        let fileURL = directory.appendingPathComponent(fileName)
+        guard fileManager.fileExists(atPath: fileURL.path) else { return fileURL }
+
+        let baseName = fileURL.deletingPathExtension().lastPathComponent
+        let fileExtension = fileURL.pathExtension
+        for index in 2...10_000 {
+            let candidateName = fileExtension.isEmpty ? "\(baseName) \(index)" : "\(baseName) \(index).\(fileExtension)"
+            let candidate = directory.appendingPathComponent(candidateName)
+            if !fileManager.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return directory.appendingPathComponent("\(UUID().uuidString)-\(fileName)")
     }
 }

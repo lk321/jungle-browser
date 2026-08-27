@@ -92,6 +92,10 @@ enum BrowserAddress {
         }
     }
 
+    static func usesInsecureHTTP(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "http"
+    }
+
     static func resolve(_ input: String, using searchEngine: BrowserSearchEngine = .google) -> URL? {
         let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return nil }

@@ -59,18 +59,7 @@ struct BrowserWorkspaceView: View {
     }
 
     private var workspaceWithNotifications: some View {
-        configuredWorkspaceLayout
-        .onReceive(NotificationCenter.default.publisher(for: .jungleNewTab)) { _ in store.createTab() }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleCloseTab)) { _ in store.closeSelectedTab() }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleCommandPalette)) { _ in
-            store.isCommandPalettePresented = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleOpenSettings)) { _ in
-            store.isSettingsPresented = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleGoBack)) { _ in store.goBack() }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleGoForward)) { _ in store.goForward() }
-        .onReceive(NotificationCenter.default.publisher(for: .jungleReload)) { _ in store.reloadSelectedTab() }
+        workspaceWithPrimaryCommands
         .onReceive(NotificationCenter.default.publisher(for: .jungleBeginTabCycle)) { _ in
             store.selectPreviouslySelectedTab(keepsPreviewVisible: true)
         }
@@ -92,6 +81,28 @@ struct BrowserWorkspaceView: View {
         }
     }
 
+    private var workspaceWithPrimaryCommands: some View {
+        configuredWorkspaceLayout
+        .onReceive(NotificationCenter.default.publisher(for: .jungleNewTab)) { _ in store.createTab() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleCloseTab)) { _ in store.closeSelectedTab() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleCommandPalette)) { _ in
+            store.isCommandPalettePresented = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleOpenSettings)) { _ in
+            store.isSettingsPresented = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleShowHistory)) { _ in
+            store.isHistoryPresented = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleShowDownloads)) { _ in
+            store.isDownloadsPresented = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleGoBack)) { _ in store.goBack() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleGoForward)) { _ in store.goForward() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleCopyActiveTabURL)) { _ in store.copySelectedTabAddress() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleReload)) { _ in store.reloadSelectedTab() }
+    }
+
     private var workspaceWithMediaAndDeveloperCommands: some View {
         workspaceWithNotifications
         .onReceive(NotificationCenter.default.publisher(for: .jungleReloadIgnoringCache)) { _ in store.reloadSelectedTabIgnoringCache() }
@@ -111,6 +122,8 @@ struct BrowserWorkspaceView: View {
         .onOpenURL { store.openExternalURL($0) }
         .sheet(isPresented: $store.isCommandPalettePresented) { CommandPalette(store: store) }
         .sheet(isPresented: $store.isSettingsPresented) { BrowserSettingsView(settings: store.settings, store: store) }
+        .sheet(isPresented: $store.isHistoryPresented) { BrowserHistoryView(store: store) }
+        .sheet(isPresented: $store.isDownloadsPresented) { BrowserDownloadsView(store: store) }
     }
 
     @ViewBuilder
@@ -124,13 +137,20 @@ struct BrowserWorkspaceView: View {
                         .id(tab.id)
                 }
 
-                if store.isSelectedTabLoading {
-                    NavigationFeedback(title: tab.address.host ?? "Loading page")
-                        .padding(18)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                VStack(alignment: .trailing, spacing: 8) {
+                    if let copiedAddress = store.copiedTabAddress {
+                        CopiedAddressFeedback(address: copiedAddress)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                    if store.isSelectedTabLoading {
+                        NavigationFeedback(title: tab.address.host ?? "Loading page")
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
+                .padding(18)
             }
             .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
+            .animation(.easeOut(duration: 0.16), value: store.copiedTabAddress)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -176,6 +196,28 @@ private struct NavigationFeedback: View {
                 .font(.system(size: 12, weight: .medium, design: .rounded))
         }
         .foregroundStyle(.primary)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.14)))
+        .shadow(radius: 10, y: 4)
+    }
+}
+
+private struct CopiedAddressFeedback: View {
+    let address: URL
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Text("URL copied")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+            Text(address.host ?? address.absoluteString)
+                .lineLimit(1)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
         .padding(.horizontal, 13)
         .padding(.vertical, 8)
         .background(.regularMaterial, in: Capsule())
@@ -271,11 +313,11 @@ private struct BrowserSidebar: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(store.bookmarkFolders.filter { !$0.isQuickAccess }) { folder in
+                    ForEach(store.visibleBookmarkFolders.filter { !$0.isQuickAccess }) { folder in
                         bookmarkFolder(folder)
                     }
 
-                    if !store.bookmarkFolders.filter({ !$0.isQuickAccess }).isEmpty {
+                    if !store.visibleBookmarkFolders.filter({ !$0.isQuickAccess }).isEmpty {
                         Divider()
                             .overlay(.primary.opacity(0.035))
                             .padding(.horizontal, 8)
@@ -344,9 +386,11 @@ private struct BrowserSidebar: View {
     private var navigationBar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: store.isSelectedTabLoading ? "arrow.triangle.2.circlepath" : "lock.fill")
+                Image(systemName: store.selectedTabUsesInsecureHTTP ? "lock.slash.fill" : "lock.fill")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(store.isSelectedTabLoading ? Color.green : Color.secondary)
+                    .foregroundStyle(store.selectedTabUsesInsecureHTTP ? Color.red : Color.secondary)
+                    .accessibilityLabel(store.selectedTabUsesInsecureHTTP ? "Not secure connection" : "Secure connection")
+                    .help(store.selectedTabUsesInsecureHTTP ? "This page uses an insecure HTTP connection" : "Secure HTTPS connection")
                 TextField("Search or enter address", text: $addressInput)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .medium, design: .rounded))
@@ -413,7 +457,7 @@ private struct BrowserSidebar: View {
                 sidebarLabel("QUICK ACCESS")
                 Spacer()
                 Menu {
-                    if let folder = store.bookmarkFolders.first(where: \.isQuickAccess) {
+                    if let folder = store.visibleBookmarkFolders.first(where: \.isQuickAccess) {
                         Button("Save current page") { store.saveCurrentPage(to: folder.id) }
                         if !folder.bookmarks.isEmpty { Divider() }
                         ForEach(folder.bookmarks) { bookmark in
@@ -446,7 +490,7 @@ private struct BrowserSidebar: View {
                     .accessibilityLabel(bookmark.title)
                     .contextMenu {
                         Button("Remove from Quick Access", role: .destructive) {
-                            guard let folderID = store.bookmarkFolders.first(where: \.isQuickAccess)?.id else { return }
+                            guard let folderID = store.visibleBookmarkFolders.first(where: \.isQuickAccess)?.id else { return }
                             store.deleteBookmark(bookmark.id, from: folderID)
                         }
                     }
@@ -457,7 +501,7 @@ private struct BrowserSidebar: View {
     }
 
     private var quickAccessBookmarks: [BrowserBookmark] {
-        Array(store.bookmarkFolders.first(where: \.isQuickAccess)?.bookmarks.prefix(6) ?? [])
+        Array(store.visibleBookmarkFolders.first(where: \.isQuickAccess)?.bookmarks.prefix(6) ?? [])
     }
 
     private var quickAccessGridColumns: [GridItem] {
@@ -501,14 +545,22 @@ private struct BrowserSidebar: View {
                 ForEach(folder.bookmarks) { bookmark in
                     Button { store.openBookmark(bookmark) } label: {
                         HStack(spacing: 8) {
-                            TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
-                                .frame(width: 14, height: 14)
-                            Text(bookmark.title)
-                                .lineLimit(1)
-                                .font(.system(size: 13, weight: .regular, design: .rounded))
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(Color.secondary.opacity(0.26))
+                                .frame(width: 2)
+                                .padding(.vertical, 6)
+                            HStack(spacing: 8) {
+                                TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
+                                    .frame(width: 14, height: 14)
+                                Text(bookmark.title)
+                                    .lineLimit(1)
+                                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 10)
+                        .padding(.leading, 22)
+                        .padding(.trailing, 10)
                         .padding(.vertical, 7)
                         .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
                     }
@@ -718,7 +770,7 @@ private struct TabFavicon: View {
     }
 }
 
-private struct ChromeIconButtonStyle: ButtonStyle {
+struct ChromeIconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
@@ -817,9 +869,15 @@ private struct CommandPalette: View {
 
             paletteSection("ACTIONS") {
                 command("New tab", symbol: "plus.square.on.square", shortcut: "⌘T") { store.createTab() }
-                command("Back", symbol: "chevron.left", shortcut: "⌘[") { store.goBack() }
-                command("Forward", symbol: "chevron.right", shortcut: "⌘]") { store.goForward() }
+                command("Back", symbol: "chevron.left", shortcut: "⌘←") { store.goBack() }
+                command("Forward", symbol: "chevron.right", shortcut: "⌘→") { store.goForward() }
+                command("Copy active tab URL", symbol: "link", shortcut: "⌘⇧C") { store.copySelectedTabAddress() }
                 command("Reload page", symbol: "arrow.clockwise", shortcut: "⌘R") { store.reloadSelectedTab() }
+                command("Reload ignoring cache", symbol: "arrow.clockwise", shortcut: "⌘⇧R") {
+                    store.reloadSelectedTabIgnoringCache()
+                }
+                command("Show history", symbol: "clock.arrow.circlepath", shortcut: "⌘J") { store.isHistoryPresented = true }
+                command("Show downloads", symbol: "arrow.down.circle", shortcut: "⌘Y") { store.isDownloadsPresented = true }
                 command("Cycle open tabs", symbol: "rectangle.3.group", shortcut: "⌃⇥") {
                     store.selectPreviouslySelectedTab()
                 }

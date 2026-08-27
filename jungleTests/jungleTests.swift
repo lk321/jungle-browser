@@ -149,6 +149,11 @@ final class JungleTests: XCTestCase {
         XCTAssertFalse(BrowserAddress.isWebURL(URL(fileURLWithPath: "/tmp/example")))
     }
 
+    func testRecognizesHTTPAsAnInsecureConnection() {
+        XCTAssertTrue(BrowserAddress.usesInsecureHTTP(URL(string: "http://example.com") ?? BrowserAddress.home))
+        XCTAssertFalse(BrowserAddress.usesInsecureHTTP(URL(string: "https://example.com") ?? BrowserAddress.home))
+    }
+
     func testResolveUsesHTTPSForHostnames() {
         XCTAssertEqual(BrowserAddress.resolve("example.com")?.absoluteString, "https://example.com")
     }
@@ -166,6 +171,80 @@ final class JungleTests: XCTestCase {
 
     func testResolveRejectsBlankAddress() {
         XCTAssertNil(BrowserAddress.resolve("  "))
+    }
+
+    func testBookmarkFolderDefaultsAreScopedToTheirProfile() {
+        let profileID = UUID()
+        let folders = BookmarkFolder.defaults(for: profileID)
+
+        XCTAssertEqual(folders.map(\.profileID), [profileID, profileID])
+        XCTAssertEqual(folders.filter(\.isQuickAccess).count, 1)
+    }
+
+    @MainActor
+    func testCommandClickDestinationOnlyAcceptsWebLinks() throws {
+        let destination = try XCTUnwrap(URL(string: "https://example.com/article"))
+
+        XCTAssertEqual(
+            BrowserStore.commandClickDestination(
+                navigationType: .linkActivated,
+                modifierFlags: .command,
+                shouldPerformDownload: false,
+                requestURL: destination
+            ),
+            destination
+        )
+        XCTAssertNil(
+            BrowserStore.commandClickDestination(
+                navigationType: .linkActivated,
+                modifierFlags: [],
+                shouldPerformDownload: false,
+                requestURL: destination
+            )
+        )
+        XCTAssertNil(
+            BrowserStore.commandClickDestination(
+                navigationType: .linkActivated,
+                modifierFlags: .command,
+                shouldPerformDownload: true,
+                requestURL: destination
+            )
+        )
+    }
+
+    @MainActor
+    func testCommandClickOpensDestinationInNewSelectedTab() throws {
+        let persistence = try BrowserPersistence(testingInMemory: true)
+        let store = BrowserStore(persistence: persistence)
+        let sourceTabID = try XCTUnwrap(store.selectedTabID)
+        let sourceTab = try XCTUnwrap(store.selectedTab)
+        let destination = try XCTUnwrap(URL(string: "https://example.com/article"))
+
+        store.openLinkInNewTab(destination, from: sourceTabID)
+
+        XCTAssertEqual(store.tabs.count, 2)
+        XCTAssertEqual(store.selectedTab?.address, destination)
+        XCTAssertEqual(store.selectedTab?.profileID, sourceTab.profileID)
+    }
+
+    @MainActor
+    func testBookmarkFoldersDoNotCrossProfileBoundaries() throws {
+        let persistence = try BrowserPersistence(testingInMemory: true)
+        let store = BrowserStore(persistence: persistence)
+        let personalProfileID = store.activeProfileID
+        let workProfileID = try XCTUnwrap(store.profiles.first(where: { $0.id != personalProfileID })?.id)
+
+        store.createBookmarkFolder(named: "Personal only")
+        XCTAssertTrue(store.visibleBookmarkFolders.contains(where: { $0.name == "Personal only" }))
+
+        store.switchProfile(to: workProfileID)
+        XCTAssertFalse(store.visibleBookmarkFolders.contains(where: { $0.name == "Personal only" }))
+
+        store.createBookmarkFolder(named: "Work only")
+        XCTAssertTrue(store.visibleBookmarkFolders.contains(where: { $0.name == "Work only" }))
+
+        store.switchProfile(to: personalProfileID)
+        XCTAssertFalse(store.visibleBookmarkFolders.contains(where: { $0.name == "Work only" }))
     }
 
     func testLinkPrewarmingOnlyAllowsSafeHTTPSDestinations() throws {
