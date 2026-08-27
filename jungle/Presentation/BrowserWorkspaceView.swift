@@ -113,6 +113,12 @@ struct BrowserWorkspaceView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .jungleToggleWebInspector)) { _ in store.toggleWebInspector() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleShowJavaScriptConsole)) { _ in store.showJavaScriptConsole() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleDeveloperMetricsDidUpdate)) { notification in
+            guard let tabID = notification.userInfo?["tabID"] as? UUID,
+                  let metrics = notification.userInfo?["metrics"] as? DeveloperMetrics
+            else { return }
+            store.recordDeveloperMetrics(metrics, for: tabID)
+        }
     }
 
     private var workspaceWithKeyboardHandling: some View {
@@ -129,28 +135,40 @@ struct BrowserWorkspaceView: View {
     @ViewBuilder
     private var browserContent: some View {
         if let tab = store.selectedTab {
-            ZStack(alignment: .bottomTrailing) {
-                if tab.isSuspended {
-                    SuspendedTabView(tab: tab, resume: { store.select(tab.id) })
-                } else {
-                    BrowserWebView(store: store, tab: tab, profile: store.activeProfile)
-                        .id(tab.id)
+            VStack(spacing: 0) {
+                if store.selectedTabIsLocalDevelopment {
+                    LocalDevelopmentToolbar(store: store, tab: tab)
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
-                VStack(alignment: .trailing, spacing: 8) {
-                    if let copiedAddress = store.copiedTabAddress {
-                        CopiedAddressFeedback(address: copiedAddress)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                ZStack(alignment: .bottomTrailing) {
+                    if tab.isSuspended {
+                        SuspendedTabView(tab: tab, resume: { store.select(tab.id) })
+                    } else {
+                        BrowserWebView(store: store, tab: tab, profile: store.activeProfile)
+                            .id(tab.id)
                     }
-                    if store.isSelectedTabLoading {
-                        NavigationFeedback(title: tab.address.host ?? "Loading page")
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+
+                    VStack(alignment: .trailing, spacing: 8) {
+                        if let copiedAddress = store.copiedTabAddress {
+                            CopiedAddressFeedback(address: copiedAddress)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                        if store.isSelectedTabLoading {
+                            NavigationFeedback(title: tab.address.host ?? "Loading page")
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
                     }
+                    .padding(18)
                 }
-                .padding(18)
+                .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
+                .animation(.easeOut(duration: 0.16), value: store.copiedTabAddress)
             }
-            .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
-            .animation(.easeOut(duration: 0.16), value: store.copiedTabAddress)
+            .animation(.spring(duration: 0.28, bounce: 0.16), value: store.selectedTabIsLocalDevelopment)
+            .opacity(store.isClosingTab(tab.id) ? 0.08 : 1)
+            .scaleEffect(store.isClosingTab(tab.id) ? 0.985 : 1)
+            .blur(radius: store.isClosingTab(tab.id) ? 1.5 : 0)
+            .animation(.easeIn(duration: 0.16), value: store.isClosingTab(tab.id))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -223,6 +241,104 @@ private struct CopiedAddressFeedback: View {
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().stroke(.white.opacity(0.14)))
         .shadow(radius: 10, y: 4)
+    }
+}
+
+private struct LocalDevelopmentToolbar: View {
+    @ObservedObject var store: BrowserStore
+    let tab: BrowserTab
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Label("Local", systemImage: "hammer.fill")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.green)
+                    .padding(.trailing, 2)
+
+                Text(tab.address.host ?? "Local development")
+                    .lineLimit(1)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                if let metrics = store.selectedDeveloperMetrics {
+                    metric("JS", value: heapDescription(metrics.javaScriptHeapBytes), help: "JavaScript heap for this page when WebKit exposes it")
+                    metric("Load", value: durationDescription(metrics.loadDurationMilliseconds), help: "Navigation timing reported by the page")
+                    metric("Req", value: "\(metrics.requestCount)", help: "Main navigation plus resource timing entries observed while loading")
+                    metric("Data", value: ByteCountFormatter.string(fromByteCount: metrics.transferredBytes, countStyle: .file), help: "Transferred resource bytes reported by the page")
+                    if metrics.repeatedRequestCount > 0 {
+                        Label("\(metrics.repeatedRequestCount) repeated", systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.orange)
+                            .help("Resources requested more than once during this load")
+                    }
+                } else {
+                    ProgressView().controlSize(.mini).tint(.green)
+                    Text("Reading page metrics")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider().frame(height: 18)
+
+                toolbarButton("arrow.clockwise", label: "Hard reload", help: "Reload without using cached resources") {
+                    store.reloadSelectedTabIgnoringCache()
+                }
+                toolbarButton("wrench.and.screwdriver", label: "DevTools", help: "Show Web Inspector") {
+                    store.toggleWebInspector()
+                }
+                toolbarButton("terminal", label: "Console", help: "Show the JavaScript Console") {
+                    store.showJavaScriptConsole()
+                }
+                toolbarButton(
+                    store.copiedScreenshotTabID == tab.id ? "checkmark" : "camera",
+                    label: store.copiedScreenshotTabID == tab.id ? "Copied" : "Screenshot",
+                    help: "Copy a PNG screenshot of this tab to the clipboard"
+                ) {
+                    store.copySelectedTabScreenshot()
+                }
+                toolbarButton("chart.bar", label: "Refresh", help: "Refresh the page metrics") {
+                    store.refreshSelectedDeveloperMetrics()
+                }
+            }
+            .padding(.horizontal, 14)
+        }
+        .frame(height: 42)
+        .background(.thinMaterial)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.green.opacity(0.28)).frame(height: 1) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Local development toolbar")
+    }
+
+    private func metric(_ title: String, value: String, help: String) -> some View {
+        Text("\(title) \(value)")
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.06), in: Capsule())
+            .help(help)
+    }
+
+    private func toolbarButton(_ symbol: String, label: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(label, systemImage: symbol)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+        }
+        .buttonStyle(.borderless)
+        .pointerCursor()
+        .help(help)
+        .accessibilityLabel(label)
+    }
+
+    private func heapDescription(_ bytes: Int64?) -> String {
+        guard let bytes else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+    }
+
+    private func durationDescription(_ milliseconds: Int?) -> String {
+        guard let milliseconds else { return "—" }
+        return "\(milliseconds) ms"
     }
 }
 
@@ -333,6 +449,8 @@ private struct BrowserSidebar: View {
                     openTabsHeader
                     ForEach(store.visibleTabs.filter { !$0.isPinned }) { tab in tabRow(tab) }
                 }
+                .animation(.easeInOut(duration: 0.18), value: store.visibleTabs.map(\.id))
+                .animation(.easeOut(duration: 0.16), value: store.closingTabIDs)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
             }
@@ -693,7 +811,7 @@ private struct SidebarTabRow: View {
                 .lineLimit(1)
                 .font(.system(size: 12.5, weight: isSelected ? .medium : .regular, design: .rounded))
             Spacer(minLength: 0)
-            Button { store.close(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
+            Button { store.requestClose(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
                 .buttonStyle(.plain)
                 .pointerCursor()
                 .opacity(showsCloseButton ? 0.7 : 0)
@@ -718,6 +836,15 @@ private struct SidebarTabRow: View {
         }
         .interactiveHover(cornerRadius: 9)
         .onTapGesture { store.select(tab.id) }
+        .opacity(store.isClosingTab(tab.id) ? 0 : 1)
+        .scaleEffect(store.isClosingTab(tab.id) ? 0.82 : 1, anchor: .trailing)
+        .blur(radius: store.isClosingTab(tab.id) ? 3 : 0)
+        .offset(x: store.isClosingTab(tab.id) ? 14 : 0)
+        .animation(.easeIn(duration: 0.16), value: store.isClosingTab(tab.id))
+        .transition(.asymmetric(
+            insertion: .opacity.combined(with: .scale(scale: 0.96)),
+            removal: .opacity.combined(with: .scale(scale: 0.84, anchor: .trailing))
+        ))
         .focusable()
         .focusEffectDisabled()
         .focused($isFocused)

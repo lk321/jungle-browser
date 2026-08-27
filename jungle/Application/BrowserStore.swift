@@ -16,7 +16,10 @@ final class BrowserStore: ObservableObject {
     @Published var isSidebarVisible = true
     @Published private(set) var tabPreviewID: UUID?
     @Published private(set) var loadingTabIDs: Set<UUID> = []
+    @Published private(set) var closingTabIDs: Set<UUID> = []
     @Published private(set) var copiedTabAddress: URL?
+    @Published private(set) var copiedScreenshotTabID: UUID?
+    @Published private(set) var developerMetricsByTabID: [UUID: DeveloperMetrics] = [:]
     @Published private(set) var bookmarkFolders: [BookmarkFolder]
     @Published private(set) var history: [BrowsingHistoryEntry]
     @Published private(set) var downloads: [BrowserDownload]
@@ -26,6 +29,8 @@ final class BrowserStore: ObservableObject {
     private var housekeepingTask: Task<Void, Never>?
     private var tabPreviewTask: Task<Void, Never>?
     private var copiedAddressFeedbackTask: Task<Void, Never>?
+    private var copiedScreenshotFeedbackTask: Task<Void, Never>?
+    private var closingTabTasks: [UUID: Task<Void, Never>] = [:]
     private var pictureInPictureActivationTask: Task<Void, Never>?
     private var pictureInPictureMonitoringTask: Task<Void, Never>?
     private var pictureInPictureTabID: UUID?
@@ -57,6 +62,8 @@ final class BrowserStore: ObservableObject {
         housekeepingTask?.cancel()
         tabPreviewTask?.cancel()
         copiedAddressFeedbackTask?.cancel()
+        copiedScreenshotFeedbackTask?.cancel()
+        closingTabTasks.values.forEach { $0.cancel() }
         pictureInPictureActivationTask?.cancel()
         pictureInPictureMonitoringTask?.cancel()
     }
@@ -69,6 +76,11 @@ final class BrowserStore: ObservableObject {
     var visibleBookmarkFolders: [BookmarkFolder] { bookmarkFolders.filter { $0.profileID == activeProfileID } }
     var isSelectedTabLoading: Bool { selectedTabID.map { loadingTabIDs.contains($0) } ?? false }
     var selectedTabUsesInsecureHTTP: Bool { selectedTab.map { BrowserAddress.usesInsecureHTTP($0.address) } ?? false }
+    var selectedTabIsLocalDevelopment: Bool { selectedTab.map { BrowserAddress.isLocalDevelopmentURL($0.address) } ?? false }
+    var selectedDeveloperMetrics: DeveloperMetrics? {
+        guard let selectedTabID else { return nil }
+        return developerMetricsByTabID[selectedTabID]
+    }
 
     func beginMemoryHousekeeping() {
         guard housekeepingTask == nil else { return }
@@ -107,11 +119,15 @@ final class BrowserStore: ObservableObject {
 
     func close(_ tabID: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        closingTabTasks.removeValue(forKey: tabID)?.cancel()
+        closingTabIDs.remove(tabID)
         let profileID = tabs[index].profileID
         let wasSelected = selectedTabID == tabID
         tabs.remove(at: index)
         loadingTabIDs.remove(tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
+        developerMetricsByTabID.removeValue(forKey: tabID)
+        if copiedScreenshotTabID == tabID { copiedScreenshotTabID = nil }
         WebViewPool.shared.discard(tabID)
         guard wasSelected else {
             persistWorkspace()
@@ -127,7 +143,21 @@ final class BrowserStore: ObservableObject {
 
     func closeSelectedTab() {
         guard let selectedTabID else { return }
-        close(selectedTabID)
+        requestClose(selectedTabID)
+    }
+
+    func requestClose(_ tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID }), !closingTabIDs.contains(tabID) else { return }
+        closingTabIDs.insert(tabID)
+        closingTabTasks[tabID] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            self?.close(tabID)
+        }
+    }
+
+    func isClosingTab(_ tabID: UUID) -> Bool {
+        closingTabIDs.contains(tabID)
     }
 
     func switchProfile(to profileID: UUID) {
@@ -423,6 +453,35 @@ final class BrowserStore: ObservableObject {
         }
     }
 
+    func copySelectedTabScreenshot() {
+        guard let tabID = selectedTabID else { return }
+        WebViewPool.shared.takeSnapshot(of: tabID) { [weak self] image in
+            guard let pngData = Self.pngData(from: image) else { return }
+            Task { @MainActor in
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                guard pasteboard.setData(pngData, forType: .png) else { return }
+                self?.copiedScreenshotTabID = tabID
+                self?.copiedScreenshotFeedbackTask?.cancel()
+                self?.copiedScreenshotFeedbackTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    self?.copiedScreenshotTabID = nil
+                }
+            }
+        }
+    }
+
+    func refreshSelectedDeveloperMetrics() {
+        guard let selectedTabID else { return }
+        WebViewPool.shared.reportDeveloperMetrics(for: selectedTabID)
+    }
+
+    func recordDeveloperMetrics(_ metrics: DeveloperMetrics, for tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID }), BrowserAddress.isLocalDevelopmentURL(metrics.pageURL) else { return }
+        developerMetricsByTabID[tabID] = metrics
+    }
+
     static func commandClickDestination(
         navigationType: WKNavigationType,
         modifierFlags: NSEvent.ModifierFlags,
@@ -443,6 +502,7 @@ final class BrowserStore: ObservableObject {
 
     func didStartNavigation(for tabID: UUID) {
         setNavigationLoading(true, for: tabID)
+        developerMetricsByTabID.removeValue(forKey: tabID)
     }
 
     func didFinishNavigation(for tabID: UUID, title: String?, url: URL?) {
@@ -456,6 +516,7 @@ final class BrowserStore: ObservableObject {
         let entry = BrowsingHistoryEntry(profileID: tab.profileID, title: tab.title, address: tab.address)
         history.insert(entry, at: 0)
         persistence.saveHistoryEntry(entry)
+        WebViewPool.shared.reportDeveloperMetrics(for: tabID)
     }
 
     func didFailNavigation(for tabID: UUID) {
@@ -465,6 +526,7 @@ final class BrowserStore: ObservableObject {
     func didTerminateWebContent(for tabID: UUID) {
         setNavigationLoading(false, for: tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
+        developerMetricsByTabID.removeValue(forKey: tabID)
     }
 
     func setNavigationLoading(_ isLoading: Bool, for tabID: UUID) {
@@ -514,6 +576,14 @@ final class BrowserStore: ObservableObject {
     private func loadedWebView(for tab: BrowserTab?) -> WKWebView? {
         guard let tab, let profile = profiles.first(where: { $0.id == tab.profileID }), WebViewPool.shared.contains(tab.id) else { return nil }
         return WebViewPool.shared.webView(for: tab, profile: profile)
+    }
+
+    private static func pngData(from image: NSImage?) -> Data? {
+        guard let image,
+              let tiffData = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData)
+        else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
     }
 
     private func requestPictureInPicture(for tabID: UUID) {

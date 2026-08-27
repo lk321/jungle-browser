@@ -128,4 +128,5 @@ extension Notification.Name {
     static let junglePictureInPictureDidExit = Notification.Name("jungle.picture-in-picture-did-exit")
     static let jungleToggleWebInspector = Notification.Name("jungle.toggle-web-inspector")
     static let jungleShowJavaScriptConsole = Notification.Name("jungle.show-javascript-console")
+    static let jungleDeveloperMetricsDidUpdate = Notification.Name("jungle.developer-metrics-did-update")
 }

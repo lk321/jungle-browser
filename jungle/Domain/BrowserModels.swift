@@ -96,6 +96,13 @@ enum BrowserAddress {
         url.scheme?.lowercased() == "http"
     }
 
+    static func isLocalDevelopmentURL(_ url: URL) -> Bool {
+        switch url.host?.lowercased() {
+        case "localhost", "127.0.0.1": true
+        default: false
+        }
+    }
+
     static func resolve(_ input: String, using searchEngine: BrowserSearchEngine = .google) -> URL? {
         let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return nil }
@@ -104,4 +111,24 @@ enum BrowserAddress {
 
         return searchEngine.searchURL(for: query)
     }
+}
+
+struct DeveloperMetrics: Equatable {
+    let pageURL: URL
+    let requestCount: Int
+    let repeatedRequestCount: Int
+    let transferredBytes: Int64
+    let javaScriptHeapBytes: Int64?
+    let documentNodeCount: Int
+    let loadDurationMilliseconds: Int?
+
+    static let empty = DeveloperMetrics(
+        pageURL: BrowserAddress.home,
+        requestCount: 0,
+        repeatedRequestCount: 0,
+        transferredBytes: 0,
+        javaScriptHeapBytes: nil,
+        documentNodeCount: 0,
+        loadDurationMilliseconds: nil
+    )
 }

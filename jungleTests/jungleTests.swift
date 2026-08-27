@@ -42,13 +42,15 @@ final class JungleTests: XCTestCase {
     }
 
     @MainActor
-    func testClosesSelectedTab() {
+    func testClosesSelectedTabAfterShowingClosingState() async {
         let store = BrowserStore()
         store.createTab()
         let closedTabID = store.selectedTabID
 
         store.closeSelectedTab()
 
+        XCTAssertTrue(closedTabID.map(store.isClosingTab) ?? false)
+        try? await Task.sleep(for: .milliseconds(250))
         XCTAssertFalse(store.tabs.contains(where: { $0.id == closedTabID }))
         XCTAssertNotEqual(store.selectedTabID, closedTabID)
     }
@@ -152,6 +154,25 @@ final class JungleTests: XCTestCase {
     func testRecognizesHTTPAsAnInsecureConnection() {
         XCTAssertTrue(BrowserAddress.usesInsecureHTTP(URL(string: "http://example.com") ?? BrowserAddress.home))
         XCTAssertFalse(BrowserAddress.usesInsecureHTTP(URL(string: "https://example.com") ?? BrowserAddress.home))
+    }
+
+    func testRecognizesLocalDevelopmentURLs() {
+        XCTAssertTrue(BrowserAddress.isLocalDevelopmentURL(URL(string: "http://localhost:3000") ?? BrowserAddress.home))
+        XCTAssertTrue(BrowserAddress.isLocalDevelopmentURL(URL(string: "http://127.0.0.1:5173") ?? BrowserAddress.home))
+        XCTAssertFalse(BrowserAddress.isLocalDevelopmentURL(URL(string: "https://example.com") ?? BrowserAddress.home))
+    }
+
+    func testDeveloperDiagnosticsDecodesPageMetrics() {
+        let encoded = """
+        {"pageURL":"http://localhost:3000/","requestCount":12,"repeatedRequestCount":3,"transferredBytes":2048,"javaScriptHeapBytes":1024,"documentNodeCount":42,"loadDurationMilliseconds":120}
+        """
+
+        let metrics = DeveloperDiagnostics.metrics(from: encoded)
+
+        XCTAssertEqual(metrics?.pageURL.host, "localhost")
+        XCTAssertEqual(metrics?.requestCount, 12)
+        XCTAssertEqual(metrics?.repeatedRequestCount, 3)
+        XCTAssertEqual(metrics?.javaScriptHeapBytes, 1024)
     }
 
     func testResolveUsesHTTPSForHostnames() {

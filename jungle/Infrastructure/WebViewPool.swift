@@ -23,7 +23,13 @@ final class WebViewPool {
         configuration.preferences.setValue(true, forKey: "allowsPictureInPictureMediaPlayback")
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
         configuration.userContentController.add(MediaMessageHandler(tabID: tab.id), contentWorld: .defaultClient, name: "jungleMedia")
+        configuration.userContentController.add(
+            DeveloperMetricsMessageHandler(tabID: tab.id),
+            contentWorld: .defaultClient,
+            name: DeveloperDiagnostics.messageHandlerName
+        )
         configuration.userContentController.addUserScript(Self.mediaScript)
+        configuration.userContentController.addUserScript(DeveloperDiagnostics.userScript)
         configuration.userContentController.addUserScript(LinkPrewarming.userScript)
         ContentBlocking.shared.install(on: configuration.userContentController)
 
@@ -69,6 +75,10 @@ final class WebViewPool {
     func takeSnapshot(of tabID: UUID, completion: @escaping (NSImage?) -> Void) {
         guard let webView = webViews[tabID] else { completion(nil); return }
         webView.takeSnapshot(with: nil) { image, _ in completion(image) }
+    }
+
+    func reportDeveloperMetrics(for tabID: UUID) {
+        evaluate("window.__jungleDeveloperMetrics && window.__jungleDeveloperMetrics.report()", in: tabID)
     }
 
     func enterPictureInPicture(for tabID: UUID) async -> Bool {
