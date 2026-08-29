@@ -37,7 +37,9 @@ Allowed types are `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
 
 - `pre-commit` checks staged whitespace and parses changed workflow YAML.
 - `commit-msg` checks the Conventional Commit header.
-- `pre-push` runs the macOS test suite.
+- `pre-push` runs the macOS test suite when full Xcode is selected. It explains
+  and skips locally when only Command Line Tools are installed; the required PR
+  workflow still runs the suite on GitHub's macOS runner.
 
 Hooks are an early guard, not the security boundary. The GitHub PR workflow
 repeats commit validation and tests, so contributors cannot bypass the policy

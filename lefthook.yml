@@ -13,4 +13,4 @@ commit-msg:
 pre-push:
   commands:
     tests:
-      run: xcodebuild test -project jungle.xcodeproj -scheme jungle -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
+      run: ./scripts/run-tests.sh
