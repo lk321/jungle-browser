@@ -43,6 +43,55 @@ enum BrowserSearchEngine: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+enum BrowserNewTabDestination: String, CaseIterable, Codable, Identifiable {
+    case native
+    case searchEngine
+    case youtube
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .native: "Jungle new tab"
+        case .searchEngine: "Search engine"
+        case .youtube: "YouTube"
+        case .custom: "Custom website"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .native: "leaf.fill"
+        case .searchEngine: "magnifyingglass"
+        case .youtube: "play.rectangle.fill"
+        case .custom: "link"
+        }
+    }
+
+    func url(searchEngine: BrowserSearchEngine, customAddress: String) -> URL {
+        switch self {
+        case .native:
+            BrowserAddress.nativeNewTab
+        case .searchEngine:
+            searchEngine.homeURL
+        case .youtube:
+            requiredURL("https://www.youtube.com")
+        case .custom:
+            Self.webURL(from: customAddress) ?? searchEngine.homeURL
+        }
+    }
+
+    private static func webURL(from input: String) -> URL? {
+        let address = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty else { return nil }
+        let suppliedURL = URL(string: address)
+        let url = suppliedURL?.scheme == nil ? URL(string: "https://\(address)") : suppliedURL
+        guard let url, BrowserAddress.isWebURL(url) else { return nil }
+        return url
+    }
+}
+
 private func requiredURL(_ value: String) -> URL {
     guard let url = URL(string: value) else { preconditionFailure("Invalid built-in URL: \(value)") }
     return url
@@ -76,6 +125,8 @@ enum BrowserAppearance: String, CaseIterable, Codable, Identifiable {
 @MainActor
 final class BrowserSettings: ObservableObject {
     @Published var searchEngine: BrowserSearchEngine { didSet { save() } }
+    @Published var newTabDestination: BrowserNewTabDestination { didSet { save() } }
+    @Published var customNewTabAddress: String { didSet { save() } }
     @Published var appearance: BrowserAppearance { didSet { save() } }
     @Published var tabSleepInterval: TimeInterval { didSet { save() } }
     private let persistence: BrowserPersistence
@@ -85,11 +136,23 @@ final class BrowserSettings: ObservableObject {
         self.persistence = resolvedPersistence
         let saved = resolvedPersistence.loadSettings()
         searchEngine = BrowserSearchEngine(rawValue: saved.searchEngine) ?? .google
+        newTabDestination = BrowserNewTabDestination(rawValue: saved.newTabDestination ?? "") ?? .searchEngine
+        customNewTabAddress = saved.customNewTabAddress ?? ""
         appearance = BrowserAppearance(rawValue: saved.appearance) ?? .system
         tabSleepInterval = saved.tabSleepInterval > 0 ? saved.tabSleepInterval : 60
     }
 
+    var newTabURL: URL {
+        newTabDestination.url(searchEngine: searchEngine, customAddress: customNewTabAddress)
+    }
+
     private func save() {
-        persistence.saveSettings(searchEngine: searchEngine, appearance: appearance, tabSleepInterval: tabSleepInterval)
+        persistence.saveSettings(
+            searchEngine: searchEngine,
+            newTabDestination: newTabDestination,
+            customNewTabAddress: customNewTabAddress,
+            appearance: appearance,
+            tabSleepInterval: tabSleepInterval
+        )
     }
 }

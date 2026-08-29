@@ -82,8 +82,66 @@ struct AddressSuggestion: Identifiable, Hashable {
     }
 }
 
+enum SmartAddressSuggestion: Identifiable {
+    case direct(URL)
+    case search(query: String, engine: BrowserSearchEngine)
+    case saved(AddressSuggestion)
+
+    var id: String {
+        switch self {
+        case let .direct(url): "direct-\(url.absoluteString)"
+        case let .search(query, engine): "search-\(engine.rawValue)-\(query)"
+        case let .saved(suggestion): "saved-\(suggestion.id.absoluteString)"
+        }
+    }
+
+    var input: String {
+        switch self {
+        case let .direct(url): url.absoluteString
+        case let .search(query, _): query
+        case let .saved(suggestion): suggestion.address.absoluteString
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .direct: "link"
+        case .search: "magnifyingglass"
+        case let .saved(suggestion): suggestion.source.symbol
+        }
+    }
+
+    var title: String {
+        switch self {
+        case let .direct(url): "Open \(url.host ?? url.absoluteString)"
+        case let .search(query, _): "Search “\(query)”"
+        case let .saved(suggestion): suggestion.title
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case let .direct(url): url.absoluteString
+        case let .search(_, engine): "Search with \(engine.title)"
+        case let .saved(suggestion): suggestion.address.absoluteString
+        }
+    }
+
+    var sourceLabel: String? {
+        guard case let .saved(suggestion) = self else { return nil }
+        return suggestion.source.label
+    }
+
+    var accessibilityLabel: String { "\(title), \(detail)" }
+}
+
 enum BrowserAddress {
     static let home = URL(string: "https://www.google.com") ?? URL(fileURLWithPath: "/")
+    static let nativeNewTab = URL(string: "jungle://new-tab") ?? URL(fileURLWithPath: "/")
+
+    static func isNativeNewTab(_ url: URL) -> Bool {
+        url == nativeNewTab
+    }
 
     static func isWebURL(_ url: URL) -> Bool {
         switch url.scheme?.lowercased() {
@@ -103,14 +161,27 @@ enum BrowserAddress {
         }
     }
 
+    static func directWebURL(from input: String) -> URL? {
+        let address = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty else { return nil }
+        if let url = URL(string: address), url.scheme != nil {
+            return isWebURL(url) ? url : nil
+        }
+        guard address.contains("."), !address.contains(" "), let url = URL(string: "https://\(address)") else { return nil }
+        return isWebURL(url) ? url : nil
+    }
+
     static func resolve(_ input: String, using searchEngine: BrowserSearchEngine = .google) -> URL? {
         let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return nil }
-        if let directURL = URL(string: query), directURL.scheme != nil { return directURL }
-        if query.contains("."), !query.contains(" ") { return URL(string: "https://" + query) }
+        if let directURL = directWebURL(from: query) { return directURL }
 
         return searchEngine.searchURL(for: query)
     }
+}
+
+extension BrowserTab {
+    var isNativeNewTab: Bool { BrowserAddress.isNativeNewTab(address) }
 }
 
 struct DeveloperMetrics: Equatable {

@@ -5,6 +5,7 @@ struct BrowserSettingsView: View {
     @ObservedObject var store: BrowserStore
     @Environment(\.dismiss) private var dismiss
     @StateObject private var defaultBrowserController = DefaultBrowserController()
+    @StateObject private var notificationController = BrowserNotificationController()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -24,6 +25,35 @@ struct BrowserSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
+            }
+
+            settingsSection("NEW TABS") {
+                Picker("Open new tabs with", selection: $settings.newTabDestination) {
+                    ForEach(BrowserNewTabDestination.allCases) { destination in
+                        Label(destination.title, systemImage: destination.symbol).tag(destination)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                if settings.newTabDestination == .native {
+                    Text("⌘T opens Jungle's native search page. Enter a full URL to open it directly, or search with your selected engine.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if settings.newTabDestination == .custom {
+                    TextField("https://www.example.com", text: $settings.customNewTabAddress)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Use an address such as youtube.com or https://www.example.com. Jungle falls back to your search engine while it is incomplete.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if settings.newTabDestination == .youtube {
+                    Text("⌘T opens YouTube directly. Your selected search engine still handles searches from the address bar.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("⌘T opens the home page of your selected search engine.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             settingsSection("APPEARANCE") {
@@ -81,6 +111,38 @@ struct BrowserSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            settingsSection("NOTIFICATIONS") {
+                HStack(spacing: 10) {
+                    Image(systemName: notificationController.isAuthorized ? "bell.badge.fill" : "bell.slash")
+                        .foregroundStyle(notificationController.isAuthorized ? Color.green : Color.secondary)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(notificationController.isAuthorized ? "Mac notifications are enabled" : "Enable website notifications")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                        Text(notificationController.statusDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if notificationController.isAuthorized {
+                        Button("System Settings", action: notificationController.openSystemSettings)
+                            .buttonStyle(.bordered)
+                    } else if notificationController.canRequestAuthorization {
+                        Button("Allow", action: notificationController.requestAuthorization)
+                            .buttonStyle(.borderedProminent)
+                            .tint(.green)
+                            .disabled(notificationController.isRequestingAuthorization)
+                    } else {
+                        Button("System Settings", action: notificationController.openSystemSettings)
+                            .buttonStyle(.bordered)
+                    }
+                }
+                Text("Each website still asks for permission separately. Permissions are kept with its profile.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             settingsSection("PROFILES") {
                 ForEach(store.profiles) { profile in
                     ProfileSettingsRow(profile: profile, store: store, canDelete: store.profiles.count > 1)
@@ -95,7 +157,10 @@ struct BrowserSettingsView: View {
         .frame(width: 386, alignment: .leading)
         .padding(22)
         .background(.regularMaterial)
-        .onAppear { defaultBrowserController.refresh() }
+        .onAppear {
+            defaultBrowserController.refresh()
+            notificationController.refreshAuthorizationStatus()
+        }
     }
 
     private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
