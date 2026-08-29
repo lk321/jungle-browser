@@ -3,9 +3,15 @@ import WebKit
 @testable import jungle
 
 final class JungleTests: XCTestCase {
+    /// Never the shared store: these tests used to read and rewrite the real browsing database.
+    @MainActor
+    private func makeStore() -> BrowserStore {
+        BrowserStore(persistence: try! BrowserPersistence(testingInMemory: true))
+    }
+
     @MainActor
     func testSwitchProfileByShortcutNumber() {
-        let store = BrowserStore()
+        let store = makeStore()
 
         store.switchProfile(number: 2)
 
@@ -15,7 +21,7 @@ final class JungleTests: XCTestCase {
 
     @MainActor
     func testMovesTabsHorizontally() {
-        let store = BrowserStore()
+        let store = makeStore()
         store.createTab()
         let tabs = store.visibleTabs
         let selectedIndex = tabs.firstIndex(where: { $0.id == store.selectedTabID }) ?? 0
@@ -43,7 +49,7 @@ final class JungleTests: XCTestCase {
 
     @MainActor
     func testClosesSelectedTabAfterShowingClosingState() async {
-        let store = BrowserStore()
+        let store = makeStore()
         store.createTab()
         let closedTabID = store.selectedTabID
 
@@ -57,7 +63,7 @@ final class JungleTests: XCTestCase {
 
     @MainActor
     func testOpeningBookmarkCreatesAndSelectsNewTab() {
-        let store = BrowserStore()
+        let store = makeStore()
         let previousTabID = store.selectedTabID
         let previousTabCount = store.tabs.count
         let bookmark = BrowserBookmark(
@@ -81,7 +87,7 @@ final class JungleTests: XCTestCase {
 
     @MainActor
     func testCyclesTabsInVisualOrderWhileControlIsHeld() {
-        let store = BrowserStore()
+        let store = makeStore()
         store.createTab()
         let tabs = store.visibleTabs
         let selectedIndex = tabs.firstIndex(where: { $0.id == store.selectedTabID }) ?? 0
@@ -97,7 +103,7 @@ final class JungleTests: XCTestCase {
 
     @MainActor
     func testNewTabCycleReturnsToTabSelectedBeforePreviousCycle() {
-        let store = BrowserStore()
+        let store = makeStore()
         store.createTab()
         let previousTabID = store.selectedTabID
         store.createTab()
@@ -112,7 +118,7 @@ final class JungleTests: XCTestCase {
 
     @MainActor
     func testReturningPictureInPictureSelectsItsSourceWithoutStartingAnotherPictureInPictureSession() {
-        let store = BrowserStore()
+        let store = makeStore()
         let pictureInPictureSourceID = store.selectedTabID
         store.createTab()
 
@@ -127,12 +133,52 @@ final class JungleTests: XCTestCase {
     }
 
     @MainActor
+    func testPictureInPictureTrackingFollowsPresentationEventsAndTabRemoval() {
+        let store = makeStore()
+        guard let sourceID = store.selectedTabID else {
+            XCTFail("Expected an initial tab")
+            return
+        }
+        store.createTab()
+        let otherTabID = store.selectedTabID
+
+        store.pictureInPictureDidChange(isActive: true, tabID: sourceID)
+
+        XCTAssertEqual(store.pictureInPictureTabID, sourceID)
+        XCTAssertEqual(store.pictureInPictureHoldTabID, sourceID)
+        XCTAssertEqual(store.selectedTabID, otherTabID, "Floating video must not steal the selection")
+
+        store.pictureInPictureDidChange(isActive: false, tabID: sourceID)
+
+        XCTAssertNil(store.pictureInPictureTabID)
+        XCTAssertEqual(store.selectedTabID, sourceID, "Returning inline shows the video's own tab")
+
+        store.pictureInPictureDidChange(isActive: true, tabID: sourceID)
+        store.close(sourceID)
+
+        XCTAssertNil(store.pictureInPictureHoldTabID, "A closed tab cannot hold the floating window")
+    }
+
+    @MainActor
     func testMediaScriptRequiresPlaybackBeforeEnteringPictureInPicture() {
         let source = WebViewPool.mediaScript.source
 
         XCTAssertTrue(source.contains("activeVideo.paused"))
         XCTAssertFalse(source.contains("playingVideo() || document.querySelector('video')"))
         XCTAssertTrue(source.contains("isPictureInPictureActive"))
+        XCTAssertTrue(source.contains("webkitpresentationmodechanged"), "Tracking is event driven, not polled")
+    }
+
+    @MainActor
+    func testYouTubeAdBlockingOnlyRunsOnYouTubeAndSkipsAdsWithoutPolling() {
+        let source = YouTubeAdBlocking.scriptSource
+
+        XCTAssertTrue(source.contains("youtube(-nocookie)?"), "Must not touch other sites")
+        XCTAssertTrue(source.contains("ad-showing"), "Only seeks while the player marks an ad")
+        XCTAssertTrue(source.contains("video.currentTime = video.duration"))
+        XCTAssertFalse(source.contains("setInterval"), "No polling timer")
+        XCTAssertFalse(source.contains("MutationObserver"), "No page-wide observer")
+        XCTAssertTrue(YouTubeAdBlocking.hiddenSelectors.contains("#player-ads"))
     }
 
     @MainActor
@@ -339,6 +385,167 @@ final class JungleTests: XCTestCase {
             result,
             "dns-prefetch:https://developer.apple.com/|preconnect:https://developer.apple.com/"
         )
+    }
+
+    @MainActor
+    func testYouTubeAdSkippingEndsAnUnskippableAdInsideWebKit() async throws {
+        let controller = WKUserContentController()
+        controller.addUserScript(YouTubeAdBlocking.userScript)
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = controller
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            """
+            <div id="movie_player" class="html5-video-player ad-showing"><video id="player-video"></video></div>
+            <div id="player-ads">promo</div>
+            """,
+            baseURL: try XCTUnwrap(URL(string: "https://www.youtube.com/watch?v=test"))
+        )
+
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        let result = try await webView.evaluateJavaScript(
+            """
+            (function () {
+                const player = document.getElementById('movie_player');
+                const video = document.getElementById('player-video');
+                Object.defineProperty(video, 'duration', { value: 30, configurable: true });
+                // A video element with no media ignores seeks, so record the one we make.
+                let seekedTo = null;
+                Object.defineProperty(video, 'currentTime', {
+                    get: function () { return seekedTo === null ? 0 : seekedTo; },
+                    set: function (value) { seekedTo = value; },
+                    configurable: true
+                });
+                video.dispatchEvent(new Event('timeupdate', { bubbles: true }));
+                const skipped = seekedTo === 30 && video.muted;
+
+                // The real video keeps its sound once the ad is gone.
+                player.classList.remove('ad-showing');
+                video.dispatchEvent(new Event('timeupdate', { bubbles: true }));
+
+                const adsHidden = getComputedStyle(document.getElementById('player-ads')).display === 'none';
+                return [skipped, !video.muted, adsHidden].join(',');
+            })();
+            """,
+            in: nil,
+            contentWorld: .defaultClient
+        ) as? String
+
+        XCTAssertEqual(result, "true,true,true")
+    }
+
+    /// The scripts are worthless if the pool stops installing them on new tabs.
+    @MainActor
+    func testPooledWebViewsCarryBothYouTubeAdScripts() async throws {
+        let profile = BrowserProfile(name: "Ads", symbol: "person", tint: .green)
+        let tab = BrowserTab(profileID: profile.id)
+        let webView = WebViewPool.shared.webView(for: tab, profile: profile)
+        let scripts = webView.configuration.userContentController.userScripts
+
+        XCTAssertTrue(scripts.contains { $0.source == YouTubeAdBlocking.scriptSource })
+        XCTAssertTrue(scripts.contains { $0.source == YouTubeAdBlocking.playerScriptSource })
+        XCTAssertTrue(scripts.contains { $0.source == WebViewPool.mediaScript.source })
+
+        WebViewPool.shared.discard(tab.id)
+        try? await WKWebsiteDataStore.remove(forIdentifier: profile.dataStoreID)
+    }
+
+    @MainActor
+    func testYouTubeAdPlacementsAreStrippedFromThePlayerResponse() async throws {
+        let controller = WKUserContentController()
+        controller.addUserScript(YouTubeAdBlocking.playerScript)
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = controller
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<title>watch</title>",
+            baseURL: try XCTUnwrap(URL(string: "https://www.youtube.com/watch?v=test"))
+        )
+
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        let result = try await webView.evaluateJavaScript(
+            """
+            (function () {
+                window.ytInitialPlayerResponse = {
+                    adPlacements: [{ kind: 'AD_PLACEMENT_KIND_START' }],
+                    playerAds: [1],
+                    videoDetails: { title: 'kept' }
+                };
+                const inline = window.ytInitialPlayerResponse;
+                const fetched = JSON.parse('{"adPlacements":[1],"streamingData":{"kept":true}}');
+                return [
+                    inline.adPlacements === undefined,
+                    inline.playerAds === undefined,
+                    inline.videoDetails.title === 'kept',
+                    fetched.adPlacements === undefined,
+                    fetched.streamingData.kept === true
+                ].join(',');
+            })();
+            """,
+            in: nil,
+            contentWorld: .page
+        ) as? String
+
+        XCTAssertEqual(result, "true,true,true,true,true")
+    }
+
+    @MainActor
+    func testYouTubeAdPlacementStrippingLeavesOtherSitesAlone() async throws {
+        let controller = WKUserContentController()
+        controller.addUserScript(YouTubeAdBlocking.playerScript)
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = controller
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<title>watch</title>",
+            baseURL: try XCTUnwrap(URL(string: "https://example.com/watch"))
+        )
+
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        let untouched = try await webView.evaluateJavaScript(
+            "JSON.parse('{\"adPlacements\":[1]}').adPlacements !== undefined",
+            in: nil,
+            contentWorld: .page
+        ) as? Bool
+
+        XCTAssertEqual(untouched, true)
+    }
+
+    @MainActor
+    func testYouTubeAdSkippingLeavesOtherSitesAlone() async throws {
+        let controller = WKUserContentController()
+        controller.addUserScript(YouTubeAdBlocking.userScript)
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = controller
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<div id=\"movie_player\" class=\"ad-showing\"><video id=\"player-video\"></video></div>",
+            baseURL: try XCTUnwrap(URL(string: "https://example.com/watch"))
+        )
+
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        let untouched = try await webView.evaluateJavaScript(
+            """
+            (function () {
+                const video = document.getElementById('player-video');
+                Object.defineProperty(video, 'duration', { value: 30, configurable: true });
+                video.dispatchEvent(new Event('timeupdate', { bubbles: true }));
+                return video.currentTime === 0 && !video.muted && !document.getElementById('jungle-ad-style');
+            })();
+            """,
+            in: nil,
+            contentWorld: .defaultClient
+        ) as? Bool
+
+        XCTAssertEqual(untouched, true)
     }
 
     func testContentRuleCompilerTranslatesHostRulesAndExceptions() throws {

@@ -125,7 +125,7 @@ extension Notification.Name {
     static let jungleReload = Notification.Name("jungle.reload")
     static let jungleReloadIgnoringCache = Notification.Name("jungle.reload-ignoring-cache")
     static let jungleTogglePictureInPicture = Notification.Name("jungle.toggle-picture-in-picture")
-    static let junglePictureInPictureDidExit = Notification.Name("jungle.picture-in-picture-did-exit")
+    static let junglePictureInPictureDidChange = Notification.Name("jungle.picture-in-picture-did-change")
     static let jungleToggleWebInspector = Notification.Name("jungle.toggle-web-inspector")
     static let jungleShowJavaScriptConsole = Notification.Name("jungle.show-javascript-console")
     static let jungleDeveloperMetricsDidUpdate = Notification.Name("jungle.developer-metrics-did-update")

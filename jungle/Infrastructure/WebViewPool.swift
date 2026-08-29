@@ -31,6 +31,8 @@ final class WebViewPool {
         configuration.userContentController.addUserScript(Self.mediaScript)
         configuration.userContentController.addUserScript(DeveloperDiagnostics.userScript)
         configuration.userContentController.addUserScript(LinkPrewarming.userScript)
+        configuration.userContentController.addUserScript(YouTubeAdBlocking.userScript)
+        configuration.userContentController.addUserScript(YouTubeAdBlocking.playerScript)
         ContentBlocking.shared.install(on: configuration.userContentController)
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -64,6 +66,13 @@ final class WebViewPool {
 
     func contains(_ tabID: UUID) -> Bool { webViews[tabID] != nil }
 
+    func tabID(for webView: WKWebView) -> UUID? {
+        webViews.first(where: { $0.value === webView })?.key
+    }
+
+    /// The host view a tab already owns, without bringing a discarded tab back to life.
+    func attachedHostView(for tabID: UUID) -> NSView? { hostViews[tabID] }
+
     func applyContentRuleLists(_ lists: [WKContentRuleList]) {
         webViews.values.forEach { webView in
             let controller = webView.configuration.userContentController
@@ -72,9 +81,13 @@ final class WebViewPool {
         }
     }
 
-    func takeSnapshot(of tabID: UUID, completion: @escaping (NSImage?) -> Void) {
+    /// `width` caps the snapshot: a suspended tab keeps its preview in memory for as long as
+    /// it sleeps, and a full-resolution window bitmap costs tens of megabytes per tab.
+    func takeSnapshot(of tabID: UUID, width: CGFloat? = nil, completion: @escaping (NSImage?) -> Void) {
         guard let webView = webViews[tabID] else { completion(nil); return }
-        webView.takeSnapshot(with: nil) { image, _ in completion(image) }
+        let configuration = WKSnapshotConfiguration()
+        if let width { configuration.snapshotWidth = NSNumber(value: Double(width)) }
+        webView.takeSnapshot(with: configuration) { image, _ in completion(image) }
     }
 
     func reportDeveloperMetrics(for tabID: UUID) {
@@ -87,10 +100,6 @@ final class WebViewPool {
 
     func exitPictureInPicture(for tabID: UUID) async -> Bool {
         await evaluateBoolean("__jungleMedia.exitPictureInPicture()", in: tabID)
-    }
-
-    func isPictureInPictureActive(for tabID: UUID) async -> Bool {
-        await evaluateBoolean("__jungleMedia.isPictureInPictureActive()", in: tabID)
     }
 
     func applyContentBackground(isDark: Bool, to webView: WKWebView) {
@@ -158,8 +167,22 @@ final class WebViewPool {
         (function () {
             let activeVideo = null;
 
+            function isPresentable(video) {
+                return video instanceof HTMLVideoElement
+                    && video.isConnected
+                    && typeof video.webkitSetPresentationMode === 'function'
+                    && video.webkitSupportsPresentationMode('picture-in-picture');
+            }
+
+            function report(isActive) {
+                window.webkit.messageHandlers.jungleMedia.postMessage({
+                    type: 'pictureInPictureDidChange',
+                    isActive: isActive
+                });
+            }
+
             document.addEventListener('play', function (event) {
-                if (event.target instanceof HTMLVideoElement) { activeVideo = event.target; }
+                if (isPresentable(event.target)) { activeVideo = event.target; }
             }, true);
 
             document.addEventListener('pause', function (event) {
@@ -170,21 +193,25 @@ final class WebViewPool {
                 }
             }, true);
 
+            // WebKit answers every presentation change here, whichever side started it:
+            // our menu command, the player's own button, or the floating window closing.
             document.addEventListener('webkitpresentationmodechanged', function (event) {
                 const video = event.target;
                 if (!(video instanceof HTMLVideoElement)) { return; }
-                if (video.webkitPresentationMode === 'inline') {
-                    window.webkit.messageHandlers.jungleMedia.postMessage({
-                        type: 'pictureInPictureDidExit'
-                    });
-                }
+                const isActive = video.webkitPresentationMode === 'picture-in-picture';
+                if (isActive) { activeVideo = video; }
+                report(isActive);
             }, true);
 
             function playingVideo() {
-                if (!activeVideo || activeVideo.paused || !activeVideo.isConnected || activeVideo.ended) { return null; }
-                if (typeof activeVideo.webkitSetPresentationMode !== 'function') { return null; }
-                if (!activeVideo.webkitSupportsPresentationMode('picture-in-picture')) { return null; }
-                return activeVideo;
+                if (isPresentable(activeVideo) && !activeVideo.paused && !activeVideo.ended) { return activeVideo; }
+                // The page can swap the element out, or start playing before this script ran,
+                // so fall back to the largest video that is actually playing right now.
+                return Array.prototype.filter.call(document.querySelectorAll('video'), function (video) {
+                    return isPresentable(video) && !video.paused && !video.ended && video.readyState >= 2;
+                }).sort(function (first, second) {
+                    return (second.clientWidth * second.clientHeight) - (first.clientWidth * first.clientHeight);
+                })[0] || null;
             }
 
             function pictureInPictureVideo() {
@@ -196,8 +223,9 @@ final class WebViewPool {
 
             window.__jungleMedia = {
                 enterPictureInPicture: function () {
+                    if (pictureInPictureVideo()) { return true; }
                     const video = playingVideo();
-                    if (!video || video.webkitPresentationMode === 'picture-in-picture') { return false; }
+                    if (!video) { return false; }
                     video.webkitSetPresentationMode('picture-in-picture');
                     return true;
                 },
@@ -205,13 +233,6 @@ final class WebViewPool {
                     const video = pictureInPictureVideo();
                     if (!video) { return false; }
                     video.webkitSetPresentationMode('inline');
-                    return true;
-                },
-                togglePictureInPicture: function () {
-                    if (this.exitPictureInPicture()) { return true; }
-                    const video = playingVideo();
-                    if (!video) { return false; }
-                    video.webkitSetPresentationMode('picture-in-picture');
                     return true;
                 },
                 isPictureInPictureActive: function () {
@@ -243,11 +264,14 @@ private final class MediaMessageHandler: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any], body["type"] as? String == "pictureInPictureDidExit" else { return }
+        guard let body = message.body as? [String: Any],
+              body["type"] as? String == "pictureInPictureDidChange",
+              let isActive = body["isActive"] as? Bool
+        else { return }
         NotificationCenter.default.post(
-            name: .junglePictureInPictureDidExit,
+            name: .junglePictureInPictureDidChange,
             object: nil,
-            userInfo: ["tabID": tabID]
+            userInfo: ["tabID": tabID, "isActive": isActive]
         )
     }
 }

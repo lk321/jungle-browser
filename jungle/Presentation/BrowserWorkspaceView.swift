@@ -107,10 +107,6 @@ struct BrowserWorkspaceView: View {
         workspaceWithNotifications
         .onReceive(NotificationCenter.default.publisher(for: .jungleReloadIgnoringCache)) { _ in store.reloadSelectedTabIgnoringCache() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleTogglePictureInPicture)) { _ in store.togglePictureInPicture() }
-        .onReceive(NotificationCenter.default.publisher(for: .junglePictureInPictureDidExit)) { notification in
-            guard let tabID = notification.userInfo?["tabID"] as? UUID else { return }
-            store.restoreTabFromPictureInPicture(tabID)
-        }
         .onReceive(NotificationCenter.default.publisher(for: .jungleToggleWebInspector)) { _ in store.toggleWebInspector() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleShowJavaScriptConsole)) { _ in store.showJavaScriptConsole() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleDeveloperMetricsDidUpdate)) { notification in
@@ -142,11 +138,13 @@ struct BrowserWorkspaceView: View {
                 }
 
                 ZStack(alignment: .bottomTrailing) {
+                    // One web container for the whole session: switching tabs must never pull a
+                    // web view out of the window, or WebKit closes its Picture in Picture window.
+                    BrowserWebView(store: store)
+
                     if tab.isSuspended {
                         SuspendedTabView(tab: tab, resume: { store.select(tab.id) })
-                    } else {
-                        BrowserWebView(store: store, tab: tab, profile: store.activeProfile)
-                            .id(tab.id)
+                            .background(Color(nsColor: WebViewPool.contentBackground(isDark: colorScheme == .dark)))
                     }
 
                     VStack(alignment: .trailing, spacing: 8) {

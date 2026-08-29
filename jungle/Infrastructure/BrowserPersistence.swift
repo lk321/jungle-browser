@@ -350,7 +350,10 @@ final class BrowserPersistence {
     }
 
     func loadHistory() -> [BrowsingHistoryEntry] {
-        let records = (try? context.fetch(FetchDescriptor<PersistedHistoryEntry>(sortBy: [SortDescriptor(\.visitedAt, order: .reverse)]))) ?? []
+        var descriptor = FetchDescriptor<PersistedHistoryEntry>(sortBy: [SortDescriptor(\.visitedAt, order: .reverse)])
+        // Older entries stay on disk; keeping every visit ever in memory is what grows unbounded.
+        descriptor.fetchLimit = BrowserStore.retainedHistoryCount
+        let records = (try? context.fetch(descriptor)) ?? []
         return records.compactMap { record in
             guard let address = URL(string: record.address) else { return nil }
             return BrowsingHistoryEntry(

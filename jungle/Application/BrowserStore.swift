@@ -20,6 +20,12 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var copiedTabAddress: URL?
     @Published private(set) var copiedScreenshotTabID: UUID?
     @Published private(set) var developerMetricsByTabID: [UUID: DeveloperMetrics] = [:]
+    /// The tab whose video WebKit is showing in its floating window.
+    @Published private(set) var pictureInPictureTabID: UUID?
+    /// The tab we just asked for Picture in Picture. Its web view has to stay in the window
+    /// until the page answers, because WebKit tears the floating window down the moment the
+    /// view that owns the video leaves the window.
+    @Published private(set) var pictureInPictureRequestTabID: UUID?
     @Published private(set) var bookmarkFolders: [BookmarkFolder]
     @Published private(set) var history: [BrowsingHistoryEntry]
     @Published private(set) var downloads: [BrowserDownload]
@@ -31,9 +37,9 @@ final class BrowserStore: ObservableObject {
     private var copiedAddressFeedbackTask: Task<Void, Never>?
     private var copiedScreenshotFeedbackTask: Task<Void, Never>?
     private var closingTabTasks: [UUID: Task<Void, Never>] = [:]
-    private var pictureInPictureActivationTask: Task<Void, Never>?
-    private var pictureInPictureMonitoringTask: Task<Void, Never>?
-    private var pictureInPictureTabID: UUID?
+    private var pictureInPictureObserver: AnyCancellable?
+    private var persistWorkspaceTask: Task<Void, Never>?
+    private var terminationObserver: AnyCancellable?
     private var settingsObserver: AnyCancellable?
     private var previouslySelectedTabID: UUID?
     private var lastRequestedAddresses: [UUID: URL] = [:]
@@ -56,6 +62,31 @@ final class BrowserStore: ObservableObject {
         settingsObserver = browserSettings.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        // The workspace write is coalesced, so the last change needs a flush before the app goes.
+        terminationObserver = NotificationCenter.default
+            .publisher(for: NSApplication.willTerminateNotification)
+            .sink { _ in
+                MainActor.assumeIsolated { [weak self] in
+                    guard let self else { return }
+                    self.persistWorkspaceTask?.cancel()
+                    self.persistence.saveWorkspace(
+                        tabs: self.tabs,
+                        profiles: self.profiles,
+                        activeProfileID: self.activeProfileID,
+                        selectedTabID: self.selectedTabID
+                    )
+                }
+            }
+        pictureInPictureObserver = NotificationCenter.default
+            .publisher(for: .junglePictureInPictureDidChange)
+            .sink { [weak self] notification in
+                guard let tabID = notification.userInfo?["tabID"] as? UUID,
+                      let isActive = notification.userInfo?["isActive"] as? Bool
+                else { return }
+                Task { @MainActor [weak self] in
+                    self?.pictureInPictureDidChange(isActive: isActive, tabID: tabID)
+                }
+            }
     }
 
     deinit {
@@ -64,8 +95,7 @@ final class BrowserStore: ObservableObject {
         copiedAddressFeedbackTask?.cancel()
         copiedScreenshotFeedbackTask?.cancel()
         closingTabTasks.values.forEach { $0.cancel() }
-        pictureInPictureActivationTask?.cancel()
-        pictureInPictureMonitoringTask?.cancel()
+        persistWorkspaceTask?.cancel()
     }
 
     var activeProfile: BrowserProfile { profiles.first(where: { $0.id == activeProfileID }) ?? profiles[0] }
@@ -74,6 +104,9 @@ final class BrowserStore: ObservableObject {
     var visibleHistory: [BrowsingHistoryEntry] { history.filter { $0.profileID == activeProfileID } }
     var visibleDownloads: [BrowserDownload] { downloads.filter { $0.profileID == activeProfileID } }
     var visibleBookmarkFolders: [BookmarkFolder] { bookmarkFolders.filter { $0.profileID == activeProfileID } }
+    /// The tab that keeps its web view attached to the window even while another tab is on
+    /// screen, so its floating window survives the switch.
+    var pictureInPictureHoldTabID: UUID? { pictureInPictureTabID ?? pictureInPictureRequestTabID }
     var isSelectedTabLoading: Bool { selectedTabID.map { loadingTabIDs.contains($0) } ?? false }
     var selectedTabUsesInsecureHTTP: Bool { selectedTab.map { BrowserAddress.usesInsecureHTTP($0.address) } ?? false }
     var selectedTabIsLocalDevelopment: Bool { selectedTab.map { BrowserAddress.isLocalDevelopmentURL($0.address) } ?? false }
@@ -104,7 +137,8 @@ final class BrowserStore: ObservableObject {
         let previousTabID = selectedTabID
         // Leaving a tab that is playing video sends it to Picture in Picture, the way
         // Safari does. The floating window keeps its own control to return it inline.
-        if entersPictureInPictureWhenLeaving, let previousTabID, previousTabID != tabID {
+        if entersPictureInPictureWhenLeaving, pictureInPictureTabID == nil,
+           let previousTabID, previousTabID != tabID, tabs.contains(where: { $0.id == previousTabID }) {
             requestPictureInPicture(for: previousTabID)
         }
         activeProfileID = tabs[index].profileID
@@ -128,6 +162,7 @@ final class BrowserStore: ObservableObject {
         lastRequestedAddresses.removeValue(forKey: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
         if copiedScreenshotTabID == tabID { copiedScreenshotTabID = nil }
+        releasePictureInPicture(for: tabID)
         WebViewPool.shared.discard(tabID)
         guard wasSelected else {
             persistWorkspace()
@@ -247,21 +282,38 @@ final class BrowserStore: ObservableObject {
     func reloadSelectedTabIgnoringCache() { loadedWebView(for: selectedTab)?.reloadFromOrigin() }
 
     func togglePictureInPicture() {
-        guard let tabID = pictureInPictureTabID ?? selectedTabID else { return }
-        Task { [weak self] in
-            if await WebViewPool.shared.isPictureInPictureActive(for: tabID) {
-                guard await WebViewPool.shared.exitPictureInPicture(for: tabID) else { return }
-                self?.restoreTabFromPictureInPicture(tabID)
-                return
+        // The floating window is driven from wherever the user is, not only from its own tab.
+        if let tabID = pictureInPictureHoldTabID {
+            Task { [weak self] in
+                guard await WebViewPool.shared.exitPictureInPicture(for: tabID) == false, let self else { return }
+                // Nothing was floating after all: drop the stale hold and start a session here.
+                self.releasePictureInPicture(for: tabID)
+                if let selectedTabID = self.selectedTabID { self.requestPictureInPicture(for: selectedTabID) }
             }
-
-            guard await WebViewPool.shared.enterPictureInPicture(for: tabID) else { return }
-            self?.beginPictureInPictureActivationTracking(for: tabID)
+            return
         }
+        guard let selectedTabID else { return }
+        requestPictureInPicture(for: selectedTabID)
+    }
+
+    func pictureInPictureDidChange(isActive: Bool, tabID: UUID) {
+        guard isActive else {
+            guard pictureInPictureHoldTabID == tabID else { return }
+            let wasFloating = pictureInPictureTabID == tabID
+            pictureInPictureTabID = nil
+            pictureInPictureRequestTabID = nil
+            if wasFloating { restoreTabFromPictureInPicture(tabID) }
+            return
+        }
+        pictureInPictureTabID = tabID
+        pictureInPictureRequestTabID = nil
     }
 
     func restoreTabFromPictureInPicture(_ tabID: UUID) {
-        stopPictureInPictureTracking(for: tabID)
+        if pictureInPictureHoldTabID == tabID {
+            pictureInPictureTabID = nil
+            pictureInPictureRequestTabID = nil
+        }
         guard selectedTabID != tabID, tabs.contains(where: { $0.id == tabID }) else { return }
         // Returning one PiP window inline must not put media from the current tab in PiP.
         select(tabID, entersPictureInPictureWhenLeaving: false)
@@ -501,6 +553,8 @@ final class BrowserStore: ObservableObject {
     func didCommitNavigation(for tabID: UUID, url: URL?) { if let url { update(tabID) { $0.address = url } } }
 
     func didStartNavigation(for tabID: UUID) {
+        // A new document takes the video, and its floating window, with it.
+        releasePictureInPicture(for: tabID)
         setNavigationLoading(true, for: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
     }
@@ -515,6 +569,7 @@ final class BrowserStore: ObservableObject {
         guard let tab = tabs.first(where: { $0.id == tabID }), BrowserAddress.isWebURL(tab.address) else { return }
         let entry = BrowsingHistoryEntry(profileID: tab.profileID, title: tab.title, address: tab.address)
         history.insert(entry, at: 0)
+        if history.count > Self.retainedHistoryCount { history.removeLast(history.count - Self.retainedHistoryCount) }
         persistence.saveHistoryEntry(entry)
         WebViewPool.shared.reportDeveloperMetrics(for: tabID)
     }
@@ -524,6 +579,7 @@ final class BrowserStore: ObservableObject {
     }
 
     func didTerminateWebContent(for tabID: UUID) {
+        releasePictureInPicture(for: tabID)
         setNavigationLoading(false, for: tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
@@ -587,56 +643,24 @@ final class BrowserStore: ObservableObject {
     }
 
     private func requestPictureInPicture(for tabID: UUID) {
-        pictureInPictureActivationTask?.cancel()
-        pictureInPictureActivationTask = Task { [weak self] in
-            guard await WebViewPool.shared.enterPictureInPicture(for: tabID), !Task.isCancelled else { return }
-            self?.beginPictureInPictureActivationTracking(for: tabID)
+        pictureInPictureRequestTabID = tabID
+        Task { [weak self] in
+            guard await WebViewPool.shared.enterPictureInPicture(for: tabID) == false else { return }
+            // ponytail: a page that accepts the request but never reports the mode change
+            // keeps its web view attached until the next tab switch replaces the request.
+            guard let self, self.pictureInPictureRequestTabID == tabID else { return }
+            self.pictureInPictureRequestTabID = nil
         }
     }
 
-    private func beginPictureInPictureActivationTracking(for tabID: UUID) {
-        pictureInPictureActivationTask?.cancel()
-        pictureInPictureTabID = tabID
-        pictureInPictureActivationTask = Task { [weak self] in
-            for _ in 0..<15 {
-                try? await Task.sleep(for: .milliseconds(200))
-                guard !Task.isCancelled, let self, self.tabs.contains(where: { $0.id == tabID }) else { return }
-                if await WebViewPool.shared.isPictureInPictureActive(for: tabID) {
-                    self.startPictureInPictureMonitoring(for: tabID)
-                    return
-                }
-            }
-            self?.stopPictureInPictureTracking(for: tabID)
-        }
-    }
-
-    private func startPictureInPictureMonitoring(for tabID: UUID) {
-        pictureInPictureTabID = tabID
-        pictureInPictureMonitoringTask?.cancel()
-        pictureInPictureMonitoringTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(250))
-                guard !Task.isCancelled, let self else { return }
-                guard self.tabs.contains(where: { $0.id == tabID }) else {
-                    self.stopPictureInPictureTracking(for: tabID)
-                    return
-                }
-                guard await WebViewPool.shared.isPictureInPictureActive(for: tabID) else {
-                    self.restoreTabFromPictureInPicture(tabID)
-                    return
-                }
-            }
-        }
-    }
-
-    private func stopPictureInPictureTracking(for tabID: UUID) {
-        guard pictureInPictureTabID == tabID else { return }
+    private func releasePictureInPicture(for tabID: UUID) {
+        guard pictureInPictureHoldTabID == tabID else { return }
         pictureInPictureTabID = nil
-        pictureInPictureActivationTask?.cancel()
-        pictureInPictureActivationTask = nil
-        pictureInPictureMonitoringTask?.cancel()
-        pictureInPictureMonitoringTask = nil
+        pictureInPictureRequestTabID = nil
     }
+
+    /// How much browsing history stays in memory. The database keeps the rest.
+    static let retainedHistoryCount = 1000
 
     static func idleTabs(in tabs: [BrowserTab], cutoff: Date, selectedTabID: UUID?) -> [BrowserTab] {
         tabs.filter { tab in
@@ -663,10 +687,11 @@ final class BrowserStore: ObservableObject {
 
     private func suspend(_ tabID: UUID) {
         guard tabs.contains(where: { $0.id == tabID && !$0.isSuspended }) else { return }
+        releasePictureInPicture(for: tabID)
         update(tabID) { $0.isSuspended = true }
         loadingTabIDs.remove(tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
-        WebViewPool.shared.takeSnapshot(of: tabID) { [weak self] image in
+        WebViewPool.shared.takeSnapshot(of: tabID, width: 720) { [weak self] image in
             Task { @MainActor in
                 guard self?.tabs.first(where: { $0.id == tabID })?.isSuspended == true else { return }
                 self?.update(tabID) { $0.preview = image }
@@ -705,8 +730,20 @@ final class BrowserStore: ObservableObject {
         persistence.saveBookmarks(bookmarkFolders)
     }
 
+    /// Every title, address and selection change lands here, and the write rewrites the whole
+    /// tab table on the main thread. Coalescing the burst keeps navigation from stuttering.
     private func persistWorkspace() {
-        persistence.saveWorkspace(tabs: tabs, profiles: profiles, activeProfileID: activeProfileID, selectedTabID: selectedTabID)
+        persistWorkspaceTask?.cancel()
+        persistWorkspaceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            self.persistence.saveWorkspace(
+                tabs: self.tabs,
+                profiles: self.profiles,
+                activeProfileID: self.activeProfileID,
+                selectedTabID: self.selectedTabID
+            )
+        }
     }
 
     private func persistProfiles() {
