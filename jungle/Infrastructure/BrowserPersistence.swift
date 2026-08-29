@@ -5,6 +5,8 @@ import SwiftData
 final class PersistedBrowserSettings {
     @Attribute(.unique) var id: String
     var searchEngine: String
+    var newTabDestination: String?
+    var customNewTabAddress: String?
     var appearance: String
     var tabSleepInterval: TimeInterval
     var activeProfileSlot: Int
@@ -13,6 +15,8 @@ final class PersistedBrowserSettings {
     init(
         id: String = "current",
         searchEngine: String = BrowserSearchEngine.google.rawValue,
+        newTabDestination: String? = nil,
+        customNewTabAddress: String? = nil,
         appearance: String = BrowserAppearance.system.rawValue,
         tabSleepInterval: TimeInterval = 60,
         activeProfileSlot: Int = 0,
@@ -20,6 +24,8 @@ final class PersistedBrowserSettings {
     ) {
         self.id = id
         self.searchEngine = searchEngine
+        self.newTabDestination = newTabDestination
+        self.customNewTabAddress = customNewTabAddress
         self.appearance = appearance
         self.tabSleepInterval = tabSleepInterval
         self.activeProfileSlot = activeProfileSlot
@@ -214,9 +220,17 @@ final class BrowserPersistence {
         return settings
     }
 
-    func saveSettings(searchEngine: BrowserSearchEngine, appearance: BrowserAppearance, tabSleepInterval: TimeInterval) {
+    func saveSettings(
+        searchEngine: BrowserSearchEngine,
+        newTabDestination: BrowserNewTabDestination,
+        customNewTabAddress: String,
+        appearance: BrowserAppearance,
+        tabSleepInterval: TimeInterval
+    ) {
         let settings = loadSettings()
         settings.searchEngine = searchEngine.rawValue
+        settings.newTabDestination = newTabDestination.rawValue
+        settings.customNewTabAddress = customNewTabAddress
         settings.appearance = appearance.rawValue
         settings.tabSleepInterval = tabSleepInterval
         save()

@@ -263,6 +263,78 @@ final class JungleTests: XCTestCase {
         )
     }
 
+    func testDirectWebURLAcceptsAHostnameAndRejectsNonWebSchemes() {
+        XCTAssertEqual(BrowserAddress.directWebURL(from: "youtube.com")?.absoluteString, "https://youtube.com")
+        XCTAssertNil(BrowserAddress.directWebURL(from: "mailto:hello@example.com"))
+    }
+
+    @MainActor
+    func testSmartAddressSuggestionsUseTheSelectedSearchEngine() throws {
+        let persistence = try BrowserPersistence(testingInMemory: true)
+        let settings = BrowserSettings(persistence: persistence)
+        settings.searchEngine = .duckDuckGo
+        let store = BrowserStore(settings: settings, persistence: persistence)
+
+        guard case let .search(query, engine) = store.smartAddressSuggestions(for: "quiet workspace").first else {
+            return XCTFail("Expected a search suggestion")
+        }
+        XCTAssertEqual(query, "quiet workspace")
+        XCTAssertEqual(engine.rawValue, BrowserSearchEngine.duckDuckGo.rawValue)
+    }
+
+    func testYouTubeIsAValidNewTabDestination() {
+        XCTAssertEqual(
+            BrowserNewTabDestination.youtube.url(searchEngine: .duckDuckGo, customAddress: "").host,
+            "www.youtube.com"
+        )
+    }
+
+    func testNativeNewTabDestinationUsesTheJunglePage() {
+        XCTAssertTrue(
+            BrowserAddress.isNativeNewTab(
+                BrowserNewTabDestination.native.url(searchEngine: .google, customAddress: "")
+            )
+        )
+    }
+
+    func testInvalidCustomNewTabDestinationFallsBackToSearchEngine() {
+        XCTAssertEqual(
+            BrowserNewTabDestination.custom.url(searchEngine: .brave, customAddress: "not a web address").host,
+            "search.brave.com"
+        )
+    }
+
+    func testCustomNewTabDestinationAcceptsAHostname() {
+        XCTAssertEqual(
+            BrowserNewTabDestination.custom.url(searchEngine: .google, customAddress: "youtube.com").host,
+            "youtube.com"
+        )
+    }
+
+    @MainActor
+    func testNewTabsUseTheConfiguredDestination() throws {
+        let persistence = try BrowserPersistence(testingInMemory: true)
+        let settings = BrowserSettings(persistence: persistence)
+        settings.newTabDestination = .youtube
+        let reloadedSettings = BrowserSettings(persistence: persistence)
+        let store = BrowserStore(settings: reloadedSettings, persistence: persistence)
+
+        XCTAssertEqual(store.selectedTab?.address.host, "www.youtube.com")
+        store.createTab()
+        XCTAssertEqual(store.selectedTab?.address.host, "www.youtube.com")
+    }
+
+    @MainActor
+    func testNativeNewTabsDoNotExposeAnInternalAddress() throws {
+        let persistence = try BrowserPersistence(testingInMemory: true)
+        let settings = BrowserSettings(persistence: persistence)
+        settings.newTabDestination = .native
+        let store = BrowserStore(settings: settings, persistence: persistence)
+
+        XCTAssertTrue(store.selectedTab?.isNativeNewTab == true)
+        XCTAssertEqual(store.selectedTabAddressText, "")
+    }
+
     func testResolveRejectsBlankAddress() {
         XCTAssertNil(BrowserAddress.resolve("  "))
     }

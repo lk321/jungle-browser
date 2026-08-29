@@ -44,7 +44,7 @@ struct BrowserWorkspaceView: View {
         .animation(.easeInOut(duration: 0.18), value: store.isSidebarVisible)
         .animation(.easeInOut(duration: 0.12), value: store.tabPreviewID)
         .task {
-            addressInput = store.selectedTab?.address.absoluteString ?? ""
+            addressInput = store.selectedTabAddressText
             store.beginMemoryHousekeeping()
             ContentBlocking.shared.start()
             ApplicationIconController.update(for: store.settings.appearance)
@@ -58,7 +58,10 @@ struct BrowserWorkspaceView: View {
         }
         .onChange(of: store.isSidebarVisible) { _, _ in publishTrafficLightsVisibility() }
         .onChange(of: store.selectedTabID) { _, _ in
-            addressInput = store.selectedTab?.address.absoluteString ?? ""
+            addressInput = store.selectedTabAddressText
+        }
+        .onChange(of: store.selectedTab?.address) { _, _ in
+            addressInput = store.selectedTabAddressText
         }
     }
 
@@ -146,7 +149,11 @@ struct BrowserWorkspaceView: View {
                     // web view out of the window, or WebKit closes its Picture in Picture window.
                     BrowserWebView(store: store)
 
-                    if !tab.isSuspended && !store.selectedTabInitialContentIsReady {
+                    if tab.isNativeNewTab {
+                        NativeNewTabView(store: store)
+                    }
+
+                    if !tab.isNativeNewTab && !tab.isSuspended && !store.selectedTabInitialContentIsReady {
                         Color(nsColor: WebViewPool.contentBackground(isDark: usesDarkContent))
                             .allowsHitTesting(false)
                     }
@@ -194,6 +201,155 @@ struct BrowserWorkspaceView: View {
         return .handled
     }
 
+}
+
+private struct NativeNewTabView: View {
+    @ObservedObject var store: BrowserStore
+    @State private var query = ""
+    @FocusState private var isSearchFieldFocused: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                Spacer(minLength: max(44, proxy.size.height * 0.16))
+
+                VStack(spacing: 22) {
+                    VStack(spacing: 10) {
+                        Image(systemName: "leaf.fill")
+                            .font(.system(size: 42, weight: .medium))
+                            .foregroundStyle(.green.gradient)
+                            .frame(width: 82, height: 82)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 25, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).stroke(.white.opacity(0.18)))
+                        Text("Jungle")
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                        Text("A calm place to start browsing")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(spacing: 8) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundStyle(.secondary)
+                            TextField("Search or enter a full URL", text: $query)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 16, weight: .medium, design: .rounded))
+                                .focused($isSearchFieldFocused)
+                                .onSubmit(openInput)
+                            Button(action: openInput) {
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .frame(width: 34, height: 34)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.green)
+                            .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityLabel("Open search or address")
+                        }
+                        .padding(8)
+                        .padding(.leading, 8)
+
+                        if !suggestions.isEmpty {
+                            VStack(spacing: 2) {
+                                ForEach(suggestions) { suggestion in
+                                    suggestionRow(suggestion)
+                                }
+                            }
+                            .padding(4)
+                            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        }
+                    }
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.18)))
+                    .shadow(color: .black.opacity(0.08), radius: 18, y: 8)
+
+                    HStack(spacing: 8) {
+                        Label("Searches use \(store.settings.searchEngine.title)", systemImage: "sparkle.magnifyingglass")
+                        Text("•")
+                        Text("Full URLs open directly")
+                    }
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: 580)
+                .padding(.horizontal, 28)
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                LinearGradient(
+                    colors: [Color.green.opacity(0.15), Color.indigo.opacity(0.06), .clear],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+        }
+        .task {
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            isSearchFieldFocused = true
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Jungle new tab page")
+    }
+
+    private func openInput() {
+        let input = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else {
+            isSearchFieldFocused = true
+            return
+        }
+        store.navigate(to: input)
+    }
+
+    private var suggestions: [SmartAddressSuggestion] {
+        store.smartAddressSuggestions(for: query)
+    }
+
+    private func suggestionRow(_ suggestion: SmartAddressSuggestion) -> some View {
+        Button {
+            query = suggestion.input
+            openInput()
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: suggestion.symbol)
+                    .foregroundStyle(suggestionColor(suggestion))
+                    .frame(width: 17)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(suggestion.title)
+                        .lineLimit(1)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    Text(suggestion.detail)
+                        .lineLimit(1)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up.left")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .accessibilityLabel(suggestion.accessibilityLabel)
+    }
+
+    private func suggestionColor(_ suggestion: SmartAddressSuggestion) -> Color {
+        switch suggestion {
+        case .direct:
+            .green
+        case .search:
+            .indigo
+        case .saved:
+            .secondary
+        }
+    }
 }
 
 private struct SidebarSurface: View {
@@ -434,6 +590,30 @@ private struct BrowserSidebar: View {
     @State private var suppressActivationUntil = Date.distantPast
     @FocusState private var isAddressFocused: Bool
 
+    private var selectedTabIsNativeNewTab: Bool {
+        store.selectedTab?.isNativeNewTab == true
+    }
+
+    private var addressBarSymbol: String {
+        if selectedTabIsNativeNewTab { return "leaf.fill" }
+        return store.selectedTabUsesInsecureHTTP ? "lock.slash.fill" : "lock.fill"
+    }
+
+    private var addressBarColor: Color {
+        if selectedTabIsNativeNewTab { return .green }
+        return store.selectedTabUsesInsecureHTTP ? .red : .secondary
+    }
+
+    private var addressBarAccessibilityLabel: String {
+        if selectedTabIsNativeNewTab { return "Jungle new tab page" }
+        return store.selectedTabUsesInsecureHTTP ? "Not secure connection" : "Secure connection"
+    }
+
+    private var addressBarHelp: String {
+        if selectedTabIsNativeNewTab { return "Jungle's native new tab page" }
+        return store.selectedTabUsesInsecureHTTP ? "This page uses an insecure HTTP connection" : "Secure HTTPS connection"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             trafficLightProfileRow
@@ -532,11 +712,11 @@ private struct BrowserSidebar: View {
     private var navigationBar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: store.selectedTabUsesInsecureHTTP ? "lock.slash.fill" : "lock.fill")
+                Image(systemName: addressBarSymbol)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(store.selectedTabUsesInsecureHTTP ? Color.red : Color.secondary)
-                    .accessibilityLabel(store.selectedTabUsesInsecureHTTP ? "Not secure connection" : "Secure connection")
-                    .help(store.selectedTabUsesInsecureHTTP ? "This page uses an insecure HTTP connection" : "Secure HTTPS connection")
+                    .foregroundStyle(addressBarColor)
+                    .accessibilityLabel(addressBarAccessibilityLabel)
+                    .help(addressBarHelp)
                 TextField("Search or enter address", text: $addressInput)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .medium, design: .rounded))
@@ -552,7 +732,7 @@ private struct BrowserSidebar: View {
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.12)))
 
-            if isAddressFocused, !store.addressSuggestions(for: addressInput).isEmpty {
+            if isAddressFocused, !store.smartAddressSuggestions(for: addressInput).isEmpty {
                 addressSuggestions
             }
         }
@@ -561,25 +741,27 @@ private struct BrowserSidebar: View {
 
     private var addressSuggestions: some View {
         VStack(alignment: .leading, spacing: 1) {
-            ForEach(store.addressSuggestions(for: addressInput)) { suggestion in
+            ForEach(store.smartAddressSuggestions(for: addressInput)) { suggestion in
                 Button {
-                    addressInput = suggestion.address.absoluteString
+                    addressInput = suggestion.input
                     isAddressFocused = false
                     store.navigate(to: addressInput)
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: suggestion.source.symbol)
+                        Image(systemName: suggestion.symbol)
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(addressSuggestionColor(suggestion))
                         VStack(alignment: .leading, spacing: 1) {
                             Text(suggestion.title).lineLimit(1).font(.system(size: 12, weight: .medium, design: .rounded))
-                            Text(suggestion.address.host ?? suggestion.address.absoluteString)
+                            Text(suggestion.detail)
                                 .lineLimit(1)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(suggestion.source.label).font(.caption2).foregroundStyle(.tertiary)
+                        if let sourceLabel = suggestion.sourceLabel {
+                            Text(sourceLabel).font(.caption2).foregroundStyle(.tertiary)
+                        }
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
@@ -588,6 +770,7 @@ private struct BrowserSidebar: View {
                 .buttonStyle(.plain)
                 .pointerCursor()
                 .interactiveHover(cornerRadius: 8)
+                .accessibilityLabel(suggestion.accessibilityLabel)
             }
         }
         .padding(4)
@@ -595,6 +778,17 @@ private struct BrowserSidebar: View {
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.16)))
         .shadow(radius: 8, y: 4)
         .padding(.top, 4)
+    }
+
+    private func addressSuggestionColor(_ suggestion: SmartAddressSuggestion) -> Color {
+        switch suggestion {
+        case .direct:
+            .green
+        case .search:
+            .indigo
+        case .saved:
+            .secondary
+        }
     }
 
     private var quickAccess: some View {
@@ -1201,7 +1395,9 @@ private struct TabFavicon: View {
     }
 
     var body: some View {
-        if isSuspended {
+        if BrowserAddress.isNativeNewTab(address) {
+            Image(systemName: "leaf.fill").foregroundStyle(.green)
+        } else if isSuspended {
             Image(systemName: "moon.zzz.fill").foregroundStyle(.secondary)
         } else if isPinned {
             Image(systemName: "pin.fill").foregroundStyle(.green)
@@ -1219,6 +1415,7 @@ private struct TabFavicon: View {
     }
 
     private var faviconURL: URL? {
+        guard !BrowserAddress.isNativeNewTab(address) else { return nil }
         guard let host = address.host else { return nil }
         return URL(string: "https://\(host)/favicon.ico")
     }

@@ -171,7 +171,7 @@ jobs:
             fi
           done
 
-          mkdir --parents "$artifacts_path"
+          mkdir -p "$artifacts_path"
           ditto --create --keepParent --sequesterRsrc --zlibCompressionLevel 9 "$app_path" "$zip_path"
           shasum --algorithm 256 "$zip_path" > "$zip_path.sha256"
 

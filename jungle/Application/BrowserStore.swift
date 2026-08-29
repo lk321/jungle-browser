@@ -51,7 +51,7 @@ final class BrowserStore: ObservableObject {
         let browserSettings = settings ?? BrowserSettings(persistence: resolvedPersistence)
         self.settings = browserSettings
         let browserProfiles = resolvedPersistence.loadProfiles()
-        let firstTab = BrowserTab(profileID: browserProfiles[0].id, address: browserSettings.searchEngine.homeURL)
+        let firstTab = BrowserTab(profileID: browserProfiles[0].id, address: browserSettings.newTabURL)
         let workspace = resolvedPersistence.loadWorkspace(profiles: browserProfiles)
         profiles = browserProfiles
         tabs = workspace?.tabs ?? [firstTab]
@@ -101,6 +101,7 @@ final class BrowserStore: ObservableObject {
 
     var activeProfile: BrowserProfile { profiles.first(where: { $0.id == activeProfileID }) ?? profiles[0] }
     var selectedTab: BrowserTab? { tabs.first(where: { $0.id == selectedTabID }) }
+    var selectedTabAddressText: String { selectedTab?.isNativeNewTab == true ? "" : selectedTab?.address.absoluteString ?? "" }
     var visibleTabs: [BrowserTab] { tabs.filter { $0.profileID == activeProfileID } }
     var visibleHistory: [BrowsingHistoryEntry] { history.filter { $0.profileID == activeProfileID } }
     var visibleDownloads: [BrowserDownload] { downloads.filter { $0.profileID == activeProfileID } }
@@ -129,7 +130,7 @@ final class BrowserStore: ObservableObject {
     }
 
     func createTab() {
-        let tab = BrowserTab(profileID: activeProfileID, address: settings.searchEngine.homeURL)
+        let tab = BrowserTab(profileID: activeProfileID, address: settings.newTabURL)
         tabs.append(tab)
         select(tab.id)
     }
@@ -250,7 +251,7 @@ final class BrowserStore: ObservableObject {
             activeProfileID = profiles[0].id
         }
         if !tabs.contains(where: { $0.profileID == activeProfileID }) {
-            let tab = BrowserTab(profileID: activeProfileID, address: settings.searchEngine.homeURL)
+            let tab = BrowserTab(profileID: activeProfileID, address: settings.newTabURL)
             tabs.append(tab)
             selectedTabID = tab.id
         } else if let selectedID = selectedTabID, !tabs.contains(where: { $0.id == selectedID }) {
@@ -460,6 +461,20 @@ final class BrowserStore: ObservableObject {
         return ranked.filter { seen.insert($0.address).inserted }.prefix(5).map { $0 }
     }
 
+    func smartAddressSuggestions(for input: String) -> [SmartAddressSuggestion] {
+        let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+
+        let directURL = BrowserAddress.directWebURL(from: query)
+        var suggestions: [SmartAddressSuggestion] = directURL.map { [.direct($0)] } ?? [.search(query: query, engine: settings.searchEngine)]
+        suggestions.append(
+            contentsOf: addressSuggestions(for: query)
+                .filter { $0.address != directURL }
+                .map(SmartAddressSuggestion.saved)
+        )
+        return suggestions
+    }
+
     func saveCurrentPage(to folderID: UUID) {
         guard let selectedTabID else { return }
         saveTab(selectedTabID, to: folderID)
@@ -569,7 +584,7 @@ final class BrowserStore: ObservableObject {
     func goBack() { if let view = loadedWebView(for: selectedTab), view.canGoBack { view.goBack() } }
     func goForward() { if let view = loadedWebView(for: selectedTab), view.canGoForward { view.goForward() } }
     func copySelectedTabAddress() {
-        guard let address = selectedTab?.address else { return }
+        guard let address = selectedTab?.address, BrowserAddress.isWebURL(address) else { return }
         NSPasteboard.general.clearContents()
         guard NSPasteboard.general.setString(address.absoluteString, forType: .string) else { return }
         copiedTabAddress = address
@@ -703,6 +718,7 @@ final class BrowserStore: ObservableObject {
 
     func loadSelectedTabIfNeeded(force: Bool = false) {
         guard let tab = selectedTab, let profile = profiles.first(where: { $0.id == tab.profileID }) else { return }
+        guard !tab.isNativeNewTab else { return }
         let webView = WebViewPool.shared.webView(for: tab, profile: profile)
         let needsInitialLoad = webView.url == nil && lastRequestedAddresses[tab.id] != tab.address
         guard force || needsInitialLoad || tab.isSuspended else { return }

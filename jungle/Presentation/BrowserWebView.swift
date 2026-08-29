@@ -37,7 +37,7 @@ struct BrowserWebView: NSViewRepresentable {
     }
 
     private func attachSelectedTab(to container: NSView, coordinator: Coordinator) -> NSView? {
-        guard let tab = store.selectedTab, !tab.isSuspended,
+        guard let tab = store.selectedTab, !tab.isSuspended, !tab.isNativeNewTab,
               let profile = store.profiles.first(where: { $0.id == tab.profileID })
         else { return nil }
 
