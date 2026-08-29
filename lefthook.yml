@@ -1,0 +1,16 @@
+pre-commit:
+  commands:
+    whitespace:
+      run: git diff-index --check --cached HEAD --
+    workflows:
+      run: ./scripts/validate-workflow-yaml.sh
+
+commit-msg:
+  commands:
+    conventional-commit:
+      run: ./scripts/validate-conventional-commit.sh {1}
+
+pre-push:
+  commands:
+    tests:
+      run: xcodebuild test -project jungle.xcodeproj -scheme jungle -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
