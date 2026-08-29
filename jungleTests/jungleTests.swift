@@ -190,6 +190,33 @@ final class JungleTests: XCTestCase {
         XCTAssertLessThan(white, 0.5)
     }
 
+    func testExplicitAppearanceControlsInitialWebContentColor() {
+        XCTAssertTrue(BrowserAppearance.dark.usesDarkContent(systemIsDark: false))
+        XCTAssertFalse(BrowserAppearance.light.usesDarkContent(systemIsDark: true))
+        XCTAssertTrue(BrowserAppearance.system.usesDarkContent(systemIsDark: true))
+        XCTAssertFalse(BrowserAppearance.system.usesDarkContent(systemIsDark: false))
+    }
+
+    @MainActor
+    func testInitialWebContentIsCoveredUntilItFinishesLoading() throws {
+        let store = makeStore()
+        let tabID = try XCTUnwrap(store.selectedTabID)
+
+        XCTAssertFalse(store.selectedTabInitialContentIsReady)
+
+        store.didCommitNavigation(for: tabID, url: store.selectedTab?.address)
+
+        XCTAssertFalse(store.selectedTabInitialContentIsReady)
+
+        store.didFinishNavigation(for: tabID, title: "Example", url: store.selectedTab?.address)
+
+        XCTAssertTrue(store.selectedTabInitialContentIsReady)
+
+        store.didTerminateWebContent(for: tabID)
+
+        XCTAssertFalse(store.selectedTabInitialContentIsReady)
+    }
+
     func testRecognizesHTTPAndHTTPSExternalURLs() {
         XCTAssertTrue(BrowserAddress.isWebURL(URL(string: "https://example.com") ?? BrowserAddress.home))
         XCTAssertTrue(BrowserAddress.isWebURL(URL(string: "http://example.com") ?? BrowserAddress.home))

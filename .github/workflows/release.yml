@@ -1,0 +1,221 @@
+name: Release macOS app
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact semantic version to publish (for example, 1.2.3). Overrides bump."
+        required: false
+        type: string
+      bump:
+        description: "Version increment used only for a manual release when version is empty."
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          stable_version_pattern='^[0-9]+\.[0-9]+\.[0-9]+$'
+          semver_pattern='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          latest_tag=""
+
+          while IFS= read -r candidate; do
+            candidate_version="${candidate#v}"
+            if [[ "$candidate_version" =~ $stable_version_pattern ]]; then
+              latest_tag="$candidate"
+              break
+            fi
+          done < <(git tag --list 'v[0-9]*' --sort=-version:refname)
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            revision_range="HEAD"
+            if [[ -n "$latest_tag" ]]; then
+              revision_range="$latest_tag..HEAD"
+            fi
+
+            bump="$(./scripts/release-bump.sh "$revision_range")"
+            if [[ "$bump" == "none" ]]; then
+              echo "No release-worthy Conventional Commit was added to main."
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            version="${INPUT_VERSION#v}"
+            if [[ ! "$version" =~ $semver_pattern ]]; then
+              echo "Invalid semantic version: $version" >&2
+              exit 1
+            fi
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "tag=v$version" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            bump="$INPUT_BUMP"
+          fi
+
+          case "$bump" in
+            major|minor|patch) ;;
+            *)
+              echo "Unsupported version increment: $bump" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "$latest_tag" ]]; then
+            version="1.0.0"
+          else
+            IFS='.' read -r major minor patch <<< "${latest_tag#v}"
+            case "$bump" in
+              major) version="$((major + 1)).0.0" ;;
+              minor) version="$major.$((minor + 1)).0" ;;
+              patch) version="$major.$minor.$((patch + 1))" ;;
+            esac
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        if: steps.version.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project jungle.xcodeproj \
+            -scheme jungle \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Archive the release app
+        if: steps.version.outputs.should_release == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive_path="$RUNNER_TEMP/Jungle.xcarchive"
+
+          xcodebuild archive \
+            -project jungle.xcodeproj \
+            -scheme jungle \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$archive_path" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            ARCHS='arm64 x86_64' \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=''
+
+      - name: Package and verify artifacts
+        if: steps.version.outputs.should_release == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive_path="$RUNNER_TEMP/Jungle.xcarchive"
+          app_path="$archive_path/Products/Applications/jungle.app"
+          artifacts_path="$RUNNER_TEMP/artifacts"
+          zip_path="$artifacts_path/Jungle-$VERSION-macos-universal.zip"
+
+          test -d "$app_path"
+          actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Contents/Info.plist")"
+          if [[ "$actual_version" != "$VERSION" ]]; then
+            echo "The app bundle has version $actual_version; expected $VERSION." >&2
+            exit 1
+          fi
+
+          architectures="$(lipo -archs "$app_path/Contents/MacOS/jungle")"
+          for architecture in arm64 x86_64; do
+            if [[ " $architectures " != *" $architecture "* ]]; then
+              echo "Missing $architecture slice in the release binary: $architectures" >&2
+              exit 1
+            fi
+          done
+
+          mkdir --parents "$artifacts_path"
+          ditto --create --keepParent --sequesterRsrc --zlibCompressionLevel 9 "$app_path" "$zip_path"
+          shasum --algorithm 256 "$zip_path" > "$zip_path.sha256"
+
+      - name: Create or validate the tag
+        if: steps.version.outputs.should_release == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_commit="$(git rev-parse HEAD)"
+
+          if git rev-parse -q --verify "refs/tags/$TAG^{}" >/dev/null; then
+            tagged_commit="$(git rev-parse "refs/tags/$TAG^{}")"
+            if [[ "$tagged_commit" != "$release_commit" ]]; then
+              echo "$TAG already points to $tagged_commit, not $release_commit." >&2
+              exit 1
+            fi
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$TAG" --message "Release $TAG" "$release_commit"
+          git push origin "refs/tags/$TAG"
+
+      - name: Publish GitHub Release
+        if: steps.version.outputs.should_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          artifacts_path="$RUNNER_TEMP/artifacts"
+          zip_path="$artifacts_path/Jungle-$VERSION-macos-universal.zip"
+          checksum_path="$zip_path.sha256"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$zip_path" "$checksum_path" --clobber
+          else
+            gh release create "$TAG" "$zip_path" "$checksum_path" \
+              --title "Jungle $TAG" \
+              --generate-notes \
+              --verify-tag
+          fi

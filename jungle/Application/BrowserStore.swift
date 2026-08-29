@@ -20,6 +20,7 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var copiedTabAddress: URL?
     @Published private(set) var copiedScreenshotTabID: UUID?
     @Published private(set) var developerMetricsByTabID: [UUID: DeveloperMetrics] = [:]
+    @Published private(set) var initialContentReadyTabIDs: Set<UUID> = []
     /// The tab whose video WebKit is showing in its floating window.
     @Published private(set) var pictureInPictureTabID: UUID?
     /// The tab we just asked for Picture in Picture. Its web view has to stay in the window
@@ -108,6 +109,7 @@ final class BrowserStore: ObservableObject {
     /// screen, so its floating window survives the switch.
     var pictureInPictureHoldTabID: UUID? { pictureInPictureTabID ?? pictureInPictureRequestTabID }
     var isSelectedTabLoading: Bool { selectedTabID.map { loadingTabIDs.contains($0) } ?? false }
+    var selectedTabInitialContentIsReady: Bool { selectedTabID.map { initialContentReadyTabIDs.contains($0) } ?? false }
     var selectedTabUsesInsecureHTTP: Bool { selectedTab.map { BrowserAddress.usesInsecureHTTP($0.address) } ?? false }
     var selectedTabIsLocalDevelopment: Bool { selectedTab.map { BrowserAddress.isLocalDevelopmentURL($0.address) } ?? false }
     var selectedDeveloperMetrics: DeveloperMetrics? {
@@ -159,6 +161,7 @@ final class BrowserStore: ObservableObject {
         let wasSelected = selectedTabID == tabID
         tabs.remove(at: index)
         loadingTabIDs.remove(tabID)
+        initialContentReadyTabIDs.remove(tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
         if copiedScreenshotTabID == tabID { copiedScreenshotTabID = nil }
@@ -623,7 +626,9 @@ final class BrowserStore: ObservableObject {
     }
     func togglePinned(_ tabID: UUID) { update(tabID) { $0.isPinned.toggle() } }
 
-    func didCommitNavigation(for tabID: UUID, url: URL?) { if let url { update(tabID) { $0.address = url } } }
+    func didCommitNavigation(for tabID: UUID, url: URL?) {
+        if let url { update(tabID) { $0.address = url } }
+    }
 
     func didStartNavigation(for tabID: UUID) {
         // A new document takes the video, and its floating window, with it.
@@ -634,6 +639,7 @@ final class BrowserStore: ObservableObject {
 
     func didFinishNavigation(for tabID: UUID, title: String?, url: URL?) {
         setNavigationLoading(false, for: tabID)
+        initialContentReadyTabIDs.insert(tabID)
         update(tabID) { tab in
             if let url { tab.address = url }
             let candidate = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -649,11 +655,13 @@ final class BrowserStore: ObservableObject {
 
     func didFailNavigation(for tabID: UUID) {
         setNavigationLoading(false, for: tabID)
+        initialContentReadyTabIDs.insert(tabID)
     }
 
     func didTerminateWebContent(for tabID: UUID) {
         releasePictureInPicture(for: tabID)
         setNavigationLoading(false, for: tabID)
+        initialContentReadyTabIDs.remove(tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
     }
@@ -763,6 +771,7 @@ final class BrowserStore: ObservableObject {
         releasePictureInPicture(for: tabID)
         update(tabID) { $0.isSuspended = true }
         loadingTabIDs.remove(tabID)
+        initialContentReadyTabIDs.remove(tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
         WebViewPool.shared.takeSnapshot(of: tabID, width: 720) { [weak self] image in
             Task { @MainActor in

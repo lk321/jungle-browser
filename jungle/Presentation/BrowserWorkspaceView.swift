@@ -6,6 +6,10 @@ struct BrowserWorkspaceView: View {
     @StateObject private var store = BrowserStore()
     @State private var addressInput = ""
 
+    private var usesDarkContent: Bool {
+        store.settings.appearance.usesDarkContent(systemIsDark: colorScheme == .dark)
+    }
+
     var body: some View {
         workspaceWithKeyboardHandling
     }
@@ -21,7 +25,7 @@ struct BrowserWorkspaceView: View {
                 }
 
                 browserContent
-                    .background(Color(nsColor: WebViewPool.contentBackground(isDark: colorScheme == .dark)))
+                    .background(Color(nsColor: WebViewPool.contentBackground(isDark: usesDarkContent)))
             }
 
             if let previewID = store.tabPreviewID,
@@ -142,9 +146,14 @@ struct BrowserWorkspaceView: View {
                     // web view out of the window, or WebKit closes its Picture in Picture window.
                     BrowserWebView(store: store)
 
+                    if !tab.isSuspended && !store.selectedTabInitialContentIsReady {
+                        Color(nsColor: WebViewPool.contentBackground(isDark: usesDarkContent))
+                            .allowsHitTesting(false)
+                    }
+
                     if tab.isSuspended {
                         SuspendedTabView(tab: tab, resume: { store.select(tab.id) })
-                            .background(Color(nsColor: WebViewPool.contentBackground(isDark: colorScheme == .dark)))
+                            .background(Color(nsColor: WebViewPool.contentBackground(isDark: usesDarkContent)))
                     }
 
                     VStack(alignment: .trailing, spacing: 8) {
