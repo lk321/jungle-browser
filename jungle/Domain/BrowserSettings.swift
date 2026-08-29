@@ -63,6 +63,14 @@ enum BrowserAppearance: String, CaseIterable, Codable, Identifiable {
         case .dark: .dark
         }
     }
+
+    func usesDarkContent(systemIsDark: Bool) -> Bool {
+        switch self {
+        case .system: systemIsDark
+        case .light: false
+        case .dark: true
+        }
+    }
 }
 
 @MainActor

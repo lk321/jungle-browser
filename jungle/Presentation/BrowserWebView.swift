@@ -10,6 +10,10 @@ struct BrowserWebView: NSViewRepresentable {
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var store: BrowserStore
 
+    private var usesDarkContent: Bool {
+        store.settings.appearance.usesDarkContent(systemIsDark: colorScheme == .dark)
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(store: store) }
 
     func makeNSView(context: Context) -> NSView {
@@ -37,7 +41,7 @@ struct BrowserWebView: NSViewRepresentable {
               let profile = store.profiles.first(where: { $0.id == tab.profileID })
         else { return nil }
 
-        let isDark = colorScheme == .dark
+        let isDark = usesDarkContent
         let webView = WebViewPool.shared.webView(for: tab, profile: profile, isDark: isDark)
         WebViewPool.shared.applyContentBackground(isDark: isDark, to: webView)
         coordinator.attach(to: webView, tabID: tab.id)
@@ -53,8 +57,8 @@ struct BrowserWebView: NSViewRepresentable {
     }
 
     private func applyContentBackground(to container: NSView) {
-        container.appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
-        container.layer?.backgroundColor = WebViewPool.contentBackground(isDark: colorScheme == .dark).cgColor
+        container.appearance = NSAppearance(named: usesDarkContent ? .darkAqua : .aqua)
+        container.layer?.backgroundColor = WebViewPool.contentBackground(isDark: usesDarkContent).cgColor
     }
 
     /// Keeps every parked tab at the container's size, whoever is on top.
