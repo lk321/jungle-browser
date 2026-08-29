@@ -822,24 +822,17 @@ private struct BrowserSidebar: View {
     private func folderBookmarkRow(_ bookmark: BrowserBookmark, folderID: UUID) -> some View {
         Button { if !shouldSuppressActivation { store.openBookmark(bookmark) } } label: {
             HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.secondary.opacity(0.26))
-                    .frame(width: 2)
-                    .padding(.vertical, 6)
-                HStack(spacing: 8) {
-                    TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
-                        .frame(width: 14, height: 14)
-                    Text(bookmark.title)
-                        .lineLimit(1)
-                        .font(.system(size: 13, weight: .regular, design: .rounded))
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
+                    .frame(width: 14, height: 14)
+                Text(bookmark.title)
+                    .lineLimit(1)
+                    .font(.system(size: 13, weight: .regular, design: .rounded))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 22)
             .padding(.trailing, 10)
             .padding(.vertical, 7)
-            .background(isBookmarkTargeted(bookmark.id) ? Color.green.opacity(0.16) : Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+            .background(isBookmarkTargeted(bookmark.id) ? Color.green.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(isBookmarkTargeted(bookmark.id) ? Color.green.opacity(0.62) : .clear, lineWidth: 1.5))
         }
         .buttonStyle(.plain)
@@ -1140,13 +1133,6 @@ private struct SidebarTabRow: View {
             if isSelected {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color.green.opacity(0.11))
-                    .overlay(alignment: .leading) {
-                        Capsule()
-                            .fill(Color.green.opacity(0.82))
-                            .frame(width: 3)
-                            .padding(.vertical, 6)
-                            .padding(.leading, 4)
-                    }
             }
         }
         .interactiveHover(cornerRadius: 9)
