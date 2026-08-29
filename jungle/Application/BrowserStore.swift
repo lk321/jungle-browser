@@ -458,11 +458,84 @@ final class BrowserStore: ObservableObject {
     }
 
     func saveCurrentPage(to folderID: UUID) {
-        guard let tab = selectedTab,
-              let index = bookmarkFolders.firstIndex(where: { $0.id == folderID && $0.profileID == activeProfileID }) else { return }
-        guard !bookmarkFolders[index].bookmarks.contains(where: { $0.address == tab.address }) else { return }
+        guard let selectedTabID else { return }
+        saveTab(selectedTabID, to: folderID)
+    }
+
+    /// Reorders only the current profile's tabs, leaving other profiles at their existing
+    /// positions in the persisted workspace. This makes a sidebar drag independent from
+    /// WebKit: no view is created, selected, or retained while rows move.
+    func moveTab(_ tabID: UUID, before destinationTabID: UUID?, persists: Bool = true) {
+        guard let source = tabs.first(where: { $0.id == tabID }),
+              source.profileID == activeProfileID
+        else { return }
+        if let destinationTabID,
+           let destination = tabs.first(where: { $0.id == destinationTabID }),
+           (destination.profileID != source.profileID || destination.isPinned != source.isPinned) {
+            return
+        }
+
+        var profileTabs = tabs.filter { $0.profileID == source.profileID && $0.isPinned == source.isPinned }
+        guard let sourceIndex = profileTabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let movingTab = profileTabs.remove(at: sourceIndex)
+        let destinationIndex = destinationTabID.flatMap { targetID in
+            profileTabs.firstIndex(where: { $0.id == targetID })
+        } ?? profileTabs.endIndex
+        profileTabs.insert(movingTab, at: destinationIndex)
+
+        var nextIndex = 0
+        for index in tabs.indices where tabs[index].profileID == source.profileID && tabs[index].isPinned == source.isPinned {
+            tabs[index] = profileTabs[nextIndex]
+            nextIndex += 1
+        }
+        if persists { persistWorkspace() }
+    }
+
+    func finishTabDrag() {
+        persistWorkspace()
+    }
+
+    @discardableResult
+    func saveTab(_ tabID: UUID, to folderID: UUID) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == tabID }),
+              tab.profileID == activeProfileID,
+              let index = bookmarkFolders.firstIndex(where: { $0.id == folderID && $0.profileID == activeProfileID }),
+              !bookmarkFolders[index].bookmarks.contains(where: { $0.address == tab.address })
+        else { return false }
         let bookmark = BrowserBookmark(title: tab.title, address: tab.address, symbol: bookmarkSymbol(for: tab.address))
         bookmarkFolders[index].bookmarks.append(bookmark)
+        persistBookmarks()
+        return true
+    }
+
+    /// Moves a saved page without recreating it, preserving its stable identity for SwiftUI.
+    /// A `persists: false` move is used only while a pointer crosses rows; the final drop
+    /// performs one SwiftData write.
+    func moveBookmark(
+        _ bookmarkID: UUID,
+        from sourceFolderID: UUID,
+        to destinationFolderID: UUID,
+        before destinationBookmarkID: UUID? = nil,
+        persists: Bool = true
+    ) {
+        guard let sourceFolderIndex = bookmarkFolders.firstIndex(where: { $0.id == sourceFolderID && $0.profileID == activeProfileID }),
+              let destinationFolderIndex = bookmarkFolders.firstIndex(where: { $0.id == destinationFolderID && $0.profileID == activeProfileID }),
+              let bookmarkIndex = bookmarkFolders[sourceFolderIndex].bookmarks.firstIndex(where: { $0.id == bookmarkID })
+        else { return }
+
+        let bookmark = bookmarkFolders[sourceFolderIndex].bookmarks.remove(at: bookmarkIndex)
+        let resolvedDestinationIndex = bookmarkFolders.firstIndex(where: { $0.id == destinationFolderID }) ?? destinationFolderIndex
+        var destinationBookmarks = bookmarkFolders[resolvedDestinationIndex].bookmarks
+        let insertionIndex = destinationBookmarkID.flatMap { targetID in
+            destinationBookmarks.firstIndex(where: { $0.id == targetID })
+        } ?? destinationBookmarks.endIndex
+        destinationBookmarks.insert(bookmark, at: insertionIndex)
+        bookmarkFolders[resolvedDestinationIndex].bookmarks = destinationBookmarks
+
+        if persists { persistBookmarks() }
+    }
+
+    func finishBookmarkDrag() {
         persistBookmarks()
     }
 

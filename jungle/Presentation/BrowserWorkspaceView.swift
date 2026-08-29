@@ -416,6 +416,13 @@ private struct BrowserSidebar: View {
     @Binding var addressInput: String
     @State private var isNewFolderPresented = false
     @State private var newFolderName = ""
+    @State private var draggedItem: BrowserDragPayload?
+    @State private var activeDropTarget: SidebarDropTarget?
+    @State private var dropTargetFrames: [SidebarDropTarget: CGRect] = [:]
+    @State private var dragPosition: CGPoint?
+    @State private var completedDropTarget: SidebarDropTarget?
+    @State private var completionID: UUID?
+    @State private var suppressActivationUntil = Date.distantPast
     @FocusState private var isAddressFocused: Bool
 
     var body: some View {
@@ -443,11 +450,21 @@ private struct BrowserSidebar: View {
                     if !pinnedTabs.isEmpty {
                         sidebarLabel("PINNED")
                         ForEach(pinnedTabs) { tab in tabRow(tab) }
+                        if draggedTabIsPinned {
+                            tabAppendDropTarget(isPinned: true)
+                        }
                     }
                     openTabsHeader
                     ForEach(store.visibleTabs.filter { !$0.isPinned }) { tab in tabRow(tab) }
+                    if draggedItem?.kind == .tab, !draggedTabIsPinned {
+                        tabAppendDropTarget(isPinned: false)
+                    }
+                    if draggedItem?.kind == .bookmark || completedDropTarget == .removal {
+                        bookmarkRemovalDropZone
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
-                .animation(.easeInOut(duration: 0.18), value: store.visibleTabs.map(\.id))
+                .animation(.spring(duration: 0.26, bounce: 0.16), value: store.visibleTabs.map(\.id))
                 .animation(.easeOut(duration: 0.16), value: store.closingTabIDs)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
@@ -457,6 +474,9 @@ private struct BrowserSidebar: View {
             sidebarFooter
                 .simultaneousGesture(TapGesture().onEnded { dismissAddressFocus() })
         }
+        .coordinateSpace(name: SidebarDragSpace.name)
+        .onPreferenceChange(SidebarDropTargetPreferenceKey.self) { dropTargetFrames = $0 }
+        .overlay(alignment: .topLeading) { dragPreviewOverlay }
         .alert("New folder", isPresented: $isNewFolderPresented) {
             TextField("Folder name", text: $newFolderName)
             Button("Create") {
@@ -467,6 +487,7 @@ private struct BrowserSidebar: View {
         } message: {
             Text("Create a place for pages you want close at hand.")
         }
+        .onDisappear(perform: clearDragState)
     }
 
     private var sidebarHeader: some View {
@@ -591,33 +612,35 @@ private struct BrowserSidebar: View {
                 .pointerCursor()
             }
             LazyVGrid(columns: quickAccessGridColumns, spacing: 7) {
-                ForEach(quickAccessBookmarks) { bookmark in
-                    Button { store.openBookmark(bookmark) } label: {
-                        TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
-                            .frame(width: 20, height: 20)
-                            .frame(maxWidth: .infinity, minHeight: 48)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 11))
-                        .overlay(RoundedRectangle(cornerRadius: 11).stroke(.white.opacity(0.10)))
+                if let folder = quickAccessFolder {
+                    ForEach(folder.bookmarks) { bookmark in
+                        quickAccessTile(bookmark, folderID: folder.id)
                     }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
-                    .interactiveHover(cornerRadius: 11)
-                    .help(bookmark.title)
-                    .accessibilityLabel(bookmark.title)
-                    .contextMenu {
-                        Button("Remove from Quick Access", role: .destructive) {
-                            guard let folderID = store.visibleBookmarkFolders.first(where: \.isQuickAccess)?.id else { return }
-                            store.deleteBookmark(bookmark.id, from: folderID)
-                        }
+                    if draggedItem != nil {
+                        quickAccessAppendDropTarget(folderID: folder.id)
                     }
                 }
             }
         }
         .padding(.horizontal, 12)
+        .background {
+            if let folder = quickAccessFolder, isQuickAccessTargeted(folder.id) {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(Color.green.opacity(0.14))
+                    .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.green.opacity(0.55), lineWidth: 1.5))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, -4)
+            }
+        }
+        .animation(.easeOut(duration: 0.14), value: activeDropTarget)
     }
 
     private var quickAccessBookmarks: [BrowserBookmark] {
-        Array(store.visibleBookmarkFolders.first(where: \.isQuickAccess)?.bookmarks.prefix(6) ?? [])
+        quickAccessFolder?.bookmarks ?? []
+    }
+
+    private var quickAccessFolder: BookmarkFolder? {
+        store.visibleBookmarkFolders.first(where: \.isQuickAccess)
     }
 
     private var quickAccessGridColumns: [GridItem] {
@@ -629,7 +652,7 @@ private struct BrowserSidebar: View {
         case 1...3:
             columnCount = count
         default:
-            columnCount = (count + 1) / 2
+            columnCount = 3
         }
         return Array(repeating: GridItem(.flexible(), spacing: 7), count: columnCount)
     }
@@ -651,41 +674,18 @@ private struct BrowserSidebar: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(.clear, in: RoundedRectangle(cornerRadius: 9))
+            .background(isFolderTargeted(folder.id) ? Color.green.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(isFolderTargeted(folder.id) ? Color.green.opacity(0.58) : .clear, lineWidth: 1.5))
             .interactiveHover(cornerRadius: 9)
+            .sidebarDropTarget(.folder(folder.id))
+            .animation(.easeOut(duration: 0.14), value: activeDropTarget)
             .contextMenu {
                 Button("Save current page") { store.saveCurrentPage(to: folder.id) }
                 Button("Delete folder", role: .destructive) { store.deleteFolder(folder.id) }
             }
             if folder.isExpanded {
                 ForEach(folder.bookmarks) { bookmark in
-                    Button { store.openBookmark(bookmark) } label: {
-                        HStack(spacing: 8) {
-                            RoundedRectangle(cornerRadius: 1)
-                                .fill(Color.secondary.opacity(0.26))
-                                .frame(width: 2)
-                                .padding(.vertical, 6)
-                            HStack(spacing: 8) {
-                                TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
-                                    .frame(width: 14, height: 14)
-                                Text(bookmark.title)
-                                    .lineLimit(1)
-                                    .font(.system(size: 13, weight: .regular, design: .rounded))
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, 22)
-                        .padding(.trailing, 10)
-                        .padding(.vertical, 7)
-                        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
-                    .interactiveHover(cornerRadius: 8)
-                    .contextMenu {
-                        Button("Remove bookmark", role: .destructive) { store.deleteBookmark(bookmark.id, from: folder.id) }
-                    }
+                    folderBookmarkRow(bookmark, folderID: folder.id)
                 }
             }
         }
@@ -769,7 +769,113 @@ private struct BrowserSidebar: View {
     }
 
     private func tabRow(_ tab: BrowserTab) -> some View {
-        SidebarTabRow(store: store, tab: tab)
+        SidebarTabRow(
+            store: store,
+            tab: tab,
+            isDropTargeted: isTabTargeted(tab.id),
+            isDragging: draggedItem == .tab(tab.id),
+            suppressActivation: shouldSuppressActivation,
+            beginDrag: beginDrag,
+            dragChanged: dragChanged,
+            finishDrag: finishDrag
+        )
+    }
+
+    private var draggedTabIsPinned: Bool {
+        guard let draggedItem, draggedItem.kind == .tab else { return false }
+        return store.visibleTabs.first(where: { $0.id == draggedItem.id })?.isPinned ?? false
+    }
+
+    private func tabAppendDropTarget(isPinned: Bool) -> some View {
+        Capsule()
+            .fill(activeDropTarget == .tabEnd(isPinned: isPinned) ? Color.green.opacity(0.78) : Color.primary.opacity(0.10))
+            .frame(height: activeDropTarget == .tabEnd(isPinned: isPinned) ? 5 : 2)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .sidebarDropTarget(.tabEnd(isPinned: isPinned))
+            .accessibilityLabel("Move tab to end of list")
+    }
+
+    private func quickAccessTile(_ bookmark: BrowserBookmark, folderID: UUID) -> some View {
+        Button { if !shouldSuppressActivation { store.openBookmark(bookmark) } } label: {
+            TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
+                .frame(width: 20, height: 20)
+                .frame(maxWidth: .infinity, minHeight: 48)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(isBookmarkTargeted(bookmark.id) ? Color.green.opacity(0.7) : .white.opacity(0.10), lineWidth: isBookmarkTargeted(bookmark.id) ? 2 : 1))
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .interactiveHover(cornerRadius: 11)
+        .animation(.spring(duration: 0.18, bounce: 0.12), value: activeDropTarget)
+        .help(bookmark.title)
+        .accessibilityLabel(bookmark.title)
+        .sidebarDropTarget(.bookmark(bookmarkID: bookmark.id, folderID: folderID))
+        .sidebarDragGesture(payload: .bookmark(bookmark.id, folderID: folderID), source: .bookmark(bookmarkID: bookmark.id, folderID: folderID), began: beginDrag, changed: dragChanged, ended: finishDrag)
+        .scaleEffect(isBookmarkTargeted(bookmark.id) ? 1.035 : (draggedItem == .bookmark(bookmark.id, folderID: folderID) ? 0.96 : 1))
+        .opacity(draggedItem == .bookmark(bookmark.id, folderID: folderID) ? 0.45 : 1)
+        .contextMenu {
+            Button("Remove from Quick Access", role: .destructive) { store.deleteBookmark(bookmark.id, from: folderID) }
+        }
+    }
+
+    private func folderBookmarkRow(_ bookmark: BrowserBookmark, folderID: UUID) -> some View {
+        Button { if !shouldSuppressActivation { store.openBookmark(bookmark) } } label: {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.secondary.opacity(0.26))
+                    .frame(width: 2)
+                    .padding(.vertical, 6)
+                HStack(spacing: 8) {
+                    TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
+                        .frame(width: 14, height: 14)
+                    Text(bookmark.title)
+                        .lineLimit(1)
+                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 22)
+            .padding(.trailing, 10)
+            .padding(.vertical, 7)
+            .background(isBookmarkTargeted(bookmark.id) ? Color.green.opacity(0.16) : Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(isBookmarkTargeted(bookmark.id) ? Color.green.opacity(0.62) : .clear, lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .interactiveHover(cornerRadius: 8)
+        .animation(.spring(duration: 0.18, bounce: 0.12), value: activeDropTarget)
+        .sidebarDropTarget(.bookmark(bookmarkID: bookmark.id, folderID: folderID))
+        .sidebarDragGesture(payload: .bookmark(bookmark.id, folderID: folderID), source: .bookmark(bookmarkID: bookmark.id, folderID: folderID), began: beginDrag, changed: dragChanged, ended: finishDrag)
+        .scaleEffect(isBookmarkTargeted(bookmark.id) ? 1.015 : (draggedItem == .bookmark(bookmark.id, folderID: folderID) ? 0.98 : 1))
+        .opacity(draggedItem == .bookmark(bookmark.id, folderID: folderID) ? 0.45 : 1)
+        .contextMenu {
+            Button("Remove bookmark", role: .destructive) { store.deleteBookmark(bookmark.id, from: folderID) }
+        }
+    }
+
+    private func quickAccessAppendDropTarget(folderID: UUID) -> some View {
+        Image(systemName: "plus")
+            .font(.caption.weight(.bold))
+            .foregroundStyle(isQuickAccessTargeted(folderID) ? Color.green : Color.secondary)
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .background(isQuickAccessTargeted(folderID) ? Color.green.opacity(0.14) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+            .overlay(RoundedRectangle(cornerRadius: 11).stroke(isQuickAccessTargeted(folderID) ? Color.green.opacity(0.65) : Color.primary.opacity(0.10), style: StrokeStyle(lineWidth: isQuickAccessTargeted(folderID) ? 1.5 : 1, dash: [4, 3])))
+            .sidebarDropTarget(.quickAccess(folderID))
+            .accessibilityLabel("Add to Quick Access")
+    }
+
+    private var bookmarkRemovalDropZone: some View {
+        Label("Drop saved page here to remove", systemImage: "trash")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(isRemovalTargeted ? Color.red : Color.secondary)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .background(isRemovalTargeted ? Color.red.opacity(0.14) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(isRemovalTargeted ? Color.red.opacity(0.62) : Color.primary.opacity(0.08), style: StrokeStyle(lineWidth: isRemovalTargeted ? 1.5 : 1, dash: [4, 3])))
+            .padding(.top, 10)
+            .sidebarDropTarget(.removal)
+            .help("Drag a saved page here to remove it from its folder or Quick Access")
     }
 
     private func chromeButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
@@ -785,11 +891,210 @@ private struct BrowserSidebar: View {
         isAddressFocused = false
     }
 
+    private var shouldSuppressActivation: Bool {
+        Date() < suppressActivationUntil
+    }
+
+    @ViewBuilder
+    private var dragPreviewOverlay: some View {
+        if let preview = dragPreview, let dragPosition {
+            SidebarDragPreview(preview: preview)
+                .position(x: dragPosition.x + 14, y: dragPosition.y + 18)
+                .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                .allowsHitTesting(false)
+        }
+    }
+
+    private var dragPreview: SidebarDragPreview.Model? {
+        guard let draggedItem else { return nil }
+        switch draggedItem.kind {
+        case .tab:
+            guard let tab = store.visibleTabs.first(where: { $0.id == draggedItem.id }) else { return nil }
+            return SidebarDragPreview.Model(
+                title: tab.title,
+                address: tab.address,
+                symbol: tab.isPinned ? "pin.fill" : "globe",
+                label: "Tab"
+            )
+        case .bookmark:
+            guard let folderID = draggedItem.folderID,
+                  let folder = store.visibleBookmarkFolders.first(where: { $0.id == folderID }),
+                  let bookmark = folder.bookmarks.first(where: { $0.id == draggedItem.id })
+            else { return nil }
+            return SidebarDragPreview.Model(
+                title: bookmark.title,
+                address: bookmark.address,
+                symbol: bookmark.symbol,
+                label: "Saved page"
+            )
+        }
+    }
+
+    private func beginDrag(_ payload: BrowserDragPayload) {
+        if draggedItem != payload {
+            draggedItem = payload
+            activeDropTarget = nil
+            completedDropTarget = nil
+            completionID = nil
+        }
+    }
+
+    private func dragChanged(source: SidebarDropTarget, location: CGPoint) {
+        guard let draggedItem, let sourceFrame = dropTargetFrames[source] else { return }
+        let point = CGPoint(x: sourceFrame.minX + location.x, y: sourceFrame.minY + location.y)
+        dragPosition = point
+        activeDropTarget = dropTarget(at: point, for: draggedItem)
+    }
+
+    private func finishDrag(source: SidebarDropTarget, location: CGPoint) {
+        defer {
+            suppressActivationUntil = Date().addingTimeInterval(0.25)
+            clearDragState()
+        }
+        guard let draggedItem, let sourceFrame = dropTargetFrames[source] else { return }
+        let point = CGPoint(x: sourceFrame.minX + location.x, y: sourceFrame.minY + location.y)
+        guard let target = dropTarget(at: point, for: draggedItem) else { return }
+
+        withAnimation(.spring(duration: 0.24, bounce: 0.18)) {
+            performDrop(draggedItem, onto: target)
+            completedDropTarget = target
+        }
+        let completionID = UUID()
+        self.completionID = completionID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            guard self.completionID == completionID else { return }
+            withAnimation(.easeOut(duration: 0.14)) {
+                completedDropTarget = nil
+            }
+        }
+    }
+
+    private func dropTarget(at point: CGPoint, for payload: BrowserDragPayload) -> SidebarDropTarget? {
+        dropTargetFrames
+            .filter { target, frame in frame.contains(point) && accepts(payload, target: target) }
+            .sorted { first, second in
+                first.value.width * first.value.height < second.value.width * second.value.height
+            }
+            .first?
+            .key
+    }
+
+    private func accepts(_ payload: BrowserDragPayload, target: SidebarDropTarget) -> Bool {
+        switch (payload.kind, target) {
+        case (.tab, .tab), (.tab, .folder), (.tab, .quickAccess):
+            return true
+        case let (.tab, .tabEnd(isPinned)):
+            return store.visibleTabs.first(where: { $0.id == payload.id })?.isPinned == isPinned
+        case let (.tab, .bookmark(_, folderID)):
+            return quickAccessFolder?.id == folderID
+        case (.bookmark, .bookmark), (.bookmark, .folder), (.bookmark, .quickAccess), (.bookmark, .removal):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func performDrop(_ payload: BrowserDragPayload, onto target: SidebarDropTarget) {
+        switch payload.kind {
+        case .tab:
+            switch target {
+            case let .tab(destinationID) where destinationID != payload.id:
+                store.moveTab(payload.id, before: destinationID)
+            case .tabEnd:
+                store.moveTab(payload.id, before: nil)
+            case let .folder(folderID), let .quickAccess(folderID), let .bookmark(_, folderID):
+                store.saveTab(payload.id, to: folderID)
+            default:
+                break
+            }
+        case .bookmark:
+            guard let sourceFolderID = payload.folderID else { return }
+            switch target {
+            case let .bookmark(destinationID, destinationFolderID) where destinationID != payload.id:
+                store.moveBookmark(payload.id, from: sourceFolderID, to: destinationFolderID, before: destinationID)
+            case let .folder(destinationFolderID), let .quickAccess(destinationFolderID):
+                store.moveBookmark(payload.id, from: sourceFolderID, to: destinationFolderID, before: nil)
+            case .removal:
+                store.deleteBookmark(payload.id, from: sourceFolderID)
+            default:
+                break
+            }
+        }
+    }
+
+    private func isTabTargeted(_ id: UUID) -> Bool {
+        activeDropTarget == .tab(id) || completedDropTarget == .tab(id)
+    }
+
+    private func isBookmarkTargeted(_ id: UUID) -> Bool {
+        if case let .bookmark(bookmarkID, _) = activeDropTarget { return bookmarkID == id }
+        if case let .bookmark(bookmarkID, _) = completedDropTarget { return bookmarkID == id }
+        return false
+    }
+
+    private func isFolderTargeted(_ id: UUID) -> Bool {
+        activeDropTarget == .folder(id) || completedDropTarget == .folder(id)
+    }
+
+    private func isQuickAccessTargeted(_ id: UUID) -> Bool {
+        activeDropTarget == .quickAccess(id) || completedDropTarget == .quickAccess(id)
+    }
+
+    private var isRemovalTargeted: Bool {
+        activeDropTarget == .removal || completedDropTarget == .removal
+    }
+
+    private func clearDragState() {
+        draggedItem = nil
+        activeDropTarget = nil
+        dragPosition = nil
+    }
+
+}
+
+private struct SidebarDragPreview: View {
+    struct Model: Equatable {
+        let title: String
+        let address: URL
+        let symbol: String
+        let label: String
+    }
+
+    let preview: Model
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TabFavicon(address: preview.address, isSuspended: false, isPinned: false, fallbackSymbol: preview.symbol)
+                .frame(width: 16, height: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(preview.title)
+                    .lineLimit(1)
+                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                Text(preview.label)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(width: 184, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Color.green.opacity(0.52), lineWidth: 1))
+        .shadow(color: .black.opacity(0.30), radius: 13, y: 7)
+        .rotationEffect(.degrees(-1.5))
+        .scaleEffect(1.03)
+    }
 }
 
 private struct SidebarTabRow: View {
     @ObservedObject var store: BrowserStore
     let tab: BrowserTab
+    let isDropTargeted: Bool
+    let isDragging: Bool
+    let suppressActivation: Bool
+    let beginDrag: (BrowserDragPayload) -> Void
+    let dragChanged: (SidebarDropTarget, CGPoint) -> Void
+    let finishDrag: (SidebarDropTarget, CGPoint) -> Void
     @State private var isHovering = false
     @FocusState private var isFocused: Bool
 
@@ -801,7 +1106,7 @@ private struct SidebarTabRow: View {
         isSelected || isHovering || isFocused
     }
 
-    var body: some View {
+    private var rowContent: some View {
         HStack(spacing: 8) {
             TabFavicon(address: tab.address, isSuspended: tab.isSuspended, isPinned: tab.isPinned)
                 .frame(width: 14, height: 14)
@@ -809,12 +1114,24 @@ private struct SidebarTabRow: View {
                 .lineLimit(1)
                 .font(.system(size: 12.5, weight: isSelected ? .medium : .regular, design: .rounded))
             Spacer(minLength: 0)
-            Button { store.requestClose(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
+        }
+    }
+
+    private var closeButton: some View {
+        Button { store.requestClose(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .opacity(showsCloseButton ? 0.7 : 0)
+            .allowsHitTesting(showsCloseButton)
+            .accessibilityLabel("Close \(tab.title)")
+    }
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            Button { if !suppressActivation { store.select(tab.id) } } label: { rowContent }
                 .buttonStyle(.plain)
-                .pointerCursor()
-                .opacity(showsCloseButton ? 0.7 : 0)
-                .allowsHitTesting(showsCloseButton)
-                .accessibilityLabel("Close \(tab.title)")
+                .contentShape(Rectangle())
+            closeButton
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -833,12 +1150,20 @@ private struct SidebarTabRow: View {
             }
         }
         .interactiveHover(cornerRadius: 9)
-        .onTapGesture { store.select(tab.id) }
-        .opacity(store.isClosingTab(tab.id) ? 0 : 1)
-        .scaleEffect(store.isClosingTab(tab.id) ? 0.82 : 1, anchor: .trailing)
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(isDropTargeted ? Color.green.opacity(0.72) : .clear, lineWidth: 1.5)
+                .allowsHitTesting(false)
+        }
+        .sidebarDropTarget(.tab(tab.id))
+        .sidebarDragGesture(payload: .tab(tab.id), source: .tab(tab.id), began: beginDrag, changed: dragChanged, ended: finishDrag)
+        .opacity(store.isClosingTab(tab.id) ? 0 : (isDragging ? 0.42 : 1))
+        .scaleEffect(store.isClosingTab(tab.id) ? 0.82 : (isDragging ? 0.98 : 1), anchor: .trailing)
         .blur(radius: store.isClosingTab(tab.id) ? 3 : 0)
         .offset(x: store.isClosingTab(tab.id) ? 14 : 0)
         .animation(.easeIn(duration: 0.16), value: store.isClosingTab(tab.id))
+        .animation(.spring(duration: 0.18, bounce: 0.12), value: isDropTargeted)
+        .animation(.easeOut(duration: 0.12), value: isDragging)
         .transition(.asymmetric(
             insertion: .opacity.combined(with: .scale(scale: 0.96)),
             removal: .opacity.combined(with: .scale(scale: 0.84, anchor: .trailing))
@@ -849,10 +1174,19 @@ private struct SidebarTabRow: View {
         .onHover { isHovering = $0 }
         .contextMenu {
             Button(tab.isPinned ? "Unpin tab" : "Pin tab") { store.togglePinned(tab.id) }
-            Menu("Save page to folder") {
-                ForEach(store.bookmarkFolders) { folder in
-                    Button(folder.name) { store.saveCurrentPage(to: folder.id) }
-                }
+            TabBookmarkFolderMenu(store: store, tabID: tab.id)
+        }
+    }
+}
+
+private struct TabBookmarkFolderMenu: View {
+    @ObservedObject var store: BrowserStore
+    let tabID: UUID
+
+    var body: some View {
+        Menu("Save page to folder") {
+            ForEach(store.visibleBookmarkFolders) { folder in
+                Button(folder.name) { store.saveTab(tabID, to: folder.id) }
             }
         }
     }

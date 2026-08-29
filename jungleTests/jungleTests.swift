@@ -249,6 +249,80 @@ final class JungleTests: XCTestCase {
     }
 
     @MainActor
+    func testMovesOpenTabsInSidebarOrderWithoutChangingSelection() throws {
+        let store = makeStore()
+        let firstTabID = try XCTUnwrap(store.selectedTabID)
+        store.createTab()
+        let secondTabID = try XCTUnwrap(store.selectedTabID)
+        store.createTab()
+        let thirdTabID = try XCTUnwrap(store.selectedTabID)
+
+        store.moveTab(thirdTabID, before: firstTabID)
+
+        XCTAssertEqual(store.visibleTabs.map(\.id), [thirdTabID, firstTabID, secondTabID])
+        XCTAssertEqual(store.selectedTabID, thirdTabID)
+    }
+
+    @MainActor
+    func testSavesOpenTabToQuickAccessWithoutCreatingAnotherTab() throws {
+        let store = makeStore()
+        let sourceTabID = try XCTUnwrap(store.selectedTabID)
+        let destination = try XCTUnwrap(URL(string: "https://example.com/quick-access"))
+        store.openLinkInNewTab(destination, from: sourceTabID)
+        let tabID = try XCTUnwrap(store.selectedTabID)
+        let quickAccess = try XCTUnwrap(store.visibleBookmarkFolders.first(where: \.isQuickAccess))
+        let initialTabCount = store.tabs.count
+
+        XCTAssertTrue(store.saveTab(tabID, to: quickAccess.id))
+
+        XCTAssertEqual(store.tabs.count, initialTabCount)
+        XCTAssertEqual(
+            store.visibleBookmarkFolders.first(where: { $0.id == quickAccess.id })?.bookmarks.last?.address,
+            store.selectedTab?.address
+        )
+        XCTAssertFalse(store.saveTab(tabID, to: quickAccess.id), "A drop should not create duplicate saved pages")
+    }
+
+    @MainActor
+    func testMovesAndRemovesBookmarkAcrossFolders() throws {
+        let store = makeStore()
+        let sourceTabID = try XCTUnwrap(store.selectedTabID)
+        let destination = try XCTUnwrap(URL(string: "https://example.com/reading-list"))
+        store.openLinkInNewTab(destination, from: sourceTabID)
+        let tabID = try XCTUnwrap(store.selectedTabID)
+        let quickAccess = try XCTUnwrap(store.visibleBookmarkFolders.first(where: \.isQuickAccess))
+        let readingList = try XCTUnwrap(store.visibleBookmarkFolders.first(where: { !$0.isQuickAccess }))
+        XCTAssertTrue(store.saveTab(tabID, to: readingList.id))
+        let bookmarkID = try XCTUnwrap(
+            store.visibleBookmarkFolders.first(where: { $0.id == readingList.id })?.bookmarks.last?.id
+        )
+
+        store.moveBookmark(bookmarkID, from: readingList.id, to: quickAccess.id)
+
+        XCTAssertFalse(store.visibleBookmarkFolders.first(where: { $0.id == readingList.id })?.bookmarks.contains(where: { $0.id == bookmarkID }) ?? true)
+        XCTAssertTrue(store.visibleBookmarkFolders.first(where: { $0.id == quickAccess.id })?.bookmarks.contains(where: { $0.id == bookmarkID }) ?? false)
+
+        store.deleteBookmark(bookmarkID, from: quickAccess.id)
+
+        XCTAssertFalse(store.visibleBookmarkFolders.flatMap(\.bookmarks).contains(where: { $0.id == bookmarkID }))
+    }
+
+    @MainActor
+    func testReordersQuickAccessBookmarks() throws {
+        let store = makeStore()
+        let quickAccess = try XCTUnwrap(store.visibleBookmarkFolders.first(where: \.isQuickAccess))
+        let firstBookmarkID = try XCTUnwrap(quickAccess.bookmarks.first?.id)
+        let lastBookmarkID = try XCTUnwrap(quickAccess.bookmarks.last?.id)
+
+        store.moveBookmark(lastBookmarkID, from: quickAccess.id, to: quickAccess.id, before: firstBookmarkID)
+
+        XCTAssertEqual(
+            store.visibleBookmarkFolders.first(where: { $0.id == quickAccess.id })?.bookmarks.first?.id,
+            lastBookmarkID
+        )
+    }
+
+    @MainActor
     func testCommandClickDestinationOnlyAcceptsWebLinks() throws {
         let destination = try XCTUnwrap(URL(string: "https://example.com/article"))
 

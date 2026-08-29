@@ -45,7 +45,9 @@ private final class WindowChromeView: NSView {
         window.styleMask.insert(.fullSizeContentView)
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
+        // Interactive sidebar content owns pointer drags. Letting AppKit treat the entire
+        // transparent surface as a window drag region races SwiftUI's drop gestures.
+        window.isMovableByWindowBackground = false
         window.standardWindowButton(.closeButton)?.isHidden = !trafficLightsVisible
         window.standardWindowButton(.miniaturizeButton)?.isHidden = !trafficLightsVisible
         window.standardWindowButton(.zoomButton)?.isHidden = !trafficLightsVisible
