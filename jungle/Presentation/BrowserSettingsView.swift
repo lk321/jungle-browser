@@ -6,19 +6,97 @@ struct BrowserSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var defaultBrowserController = DefaultBrowserController()
     @StateObject private var notificationController = BrowserNotificationController()
+    @State private var selectedCategory: SettingsCategory = .general
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Label("Browser settings", systemImage: "gearshape.fill")
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
-                Spacer()
-                Button("Done") { dismiss() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.green)
-            }
+        HStack(spacing: 0) {
+            categorySidebar
+            Divider()
+            VStack(spacing: 0) {
+                HStack {
+                    Label(selectedCategory.title, systemImage: selectedCategory.symbol)
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                    Spacer()
+                    Button("Done") { dismiss() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                }
+                .padding(.horizontal, 24)
+                .frame(height: 64)
 
-            settingsSection("SEARCH") {
+                Divider()
+
+                ScrollView {
+                    settingsContent
+                        .padding(24)
+                }
+            }
+        }
+        .frame(width: 720, height: 540)
+        .background(.regularMaterial)
+        .onAppear {
+            defaultBrowserController.refresh()
+            notificationController.refreshAuthorizationStatus()
+        }
+    }
+
+    private var categorySidebar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("JUNGLE")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            ForEach(SettingsCategory.allCases) { category in
+                Button { selectedCategory = category } label: {
+                    Label(category.title, systemImage: category.symbol)
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(selectedCategory == category ? Color.primary : Color.secondary)
+                .background(selectedCategory == category ? Color.green.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 8))
+            }
+            Spacer()
+            Text("Preferences")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 16)
+        }
+        .padding(.vertical, 20)
+        .frame(width: 176, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var settingsContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(selectedCategory.description)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            switch selectedCategory {
+            case .general:
+                generalSettings
+            case .workspace:
+                workspaceSettings
+            case .system:
+                systemSettings
+            case .extensions:
+                extensionSettings
+            case .profiles:
+                profileSettings
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var generalSettings: some View {
+        Group {
+            settingsSection("Search") {
                 Picker("Default search engine", selection: $settings.searchEngine) {
                     ForEach(BrowserSearchEngine.allCases) { engine in
                         Text(engine.title).tag(engine)
@@ -27,36 +105,17 @@ struct BrowserSettingsView: View {
                 .pickerStyle(.menu)
             }
 
-            settingsSection("NEW TABS") {
+            settingsSection("New tabs") {
                 Picker("Open new tabs with", selection: $settings.newTabDestination) {
                     ForEach(BrowserNewTabDestination.allCases) { destination in
                         Label(destination.title, systemImage: destination.symbol).tag(destination)
                     }
                 }
                 .pickerStyle(.menu)
-
-                if settings.newTabDestination == .native {
-                    Text("⌘T opens Jungle's native search page. Enter a full URL to open it directly, or search with your selected engine.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if settings.newTabDestination == .custom {
-                    TextField("https://www.example.com", text: $settings.customNewTabAddress)
-                        .textFieldStyle(.roundedBorder)
-                    Text("Use an address such as youtube.com or https://www.example.com. Jungle falls back to your search engine while it is incomplete.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if settings.newTabDestination == .youtube {
-                    Text("⌘T opens YouTube directly. Your selected search engine still handles searches from the address bar.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("⌘T opens the home page of your selected search engine.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                newTabDescription
             }
 
-            settingsSection("APPEARANCE") {
+            settingsSection("Appearance") {
                 Picker("Appearance", selection: $settings.appearance) {
                     ForEach(BrowserAppearance.allCases) { appearance in
                         Text(appearance.title).tag(appearance)
@@ -64,8 +123,40 @@ struct BrowserSettingsView: View {
                 }
                 .pickerStyle(.segmented)
             }
+        }
+    }
 
-            settingsSection("DEFAULT BROWSER") {
+    @ViewBuilder
+    private var newTabDescription: some View {
+        if settings.newTabDestination == .native {
+            caption("⌘T opens Jungle's native search page. Enter a full URL to open it directly, or search with your selected engine.")
+        } else if settings.newTabDestination == .custom {
+            TextField("https://www.example.com", text: $settings.customNewTabAddress)
+                .textFieldStyle(.roundedBorder)
+            caption("Use an address such as youtube.com or https://www.example.com. Jungle falls back to your search engine while it is incomplete.")
+        } else if settings.newTabDestination == .youtube {
+            caption("⌘T opens YouTube directly. Your selected search engine still handles searches from the address bar.")
+        } else {
+            caption("⌘T opens the home page of your selected search engine.")
+        }
+    }
+
+    private var workspaceSettings: some View {
+        settingsSection("Memory") {
+            Picker("Suspend inactive tabs after", selection: $settings.tabSleepInterval) {
+                Text("30 seconds").tag(TimeInterval(30))
+                Text("1 minute").tag(TimeInterval(60))
+                Text("5 minutes").tag(TimeInterval(300))
+                Text("15 minutes").tag(TimeInterval(900))
+            }
+            .pickerStyle(.menu)
+            caption("Suspended tabs release their WebKit view and reload their last address when opened.")
+        }
+    }
+
+    private var systemSettings: some View {
+        Group {
+            settingsSection("Default browser") {
                 HStack(spacing: 10) {
                     Image(systemName: defaultBrowserController.isDefaultBrowser ? "checkmark.circle.fill" : "safari")
                         .foregroundStyle(defaultBrowserController.isDefaultBrowser ? Color.green : Color.secondary)
@@ -73,9 +164,7 @@ struct BrowserSettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(defaultBrowserController.isDefaultBrowser ? "Jungle is your default browser" : "Use Jungle as your default browser")
                             .font(.system(size: 13, weight: .medium, design: .rounded))
-                        Text("Opens web links from other apps in Jungle.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        caption("Opens web links from other apps in Jungle.")
                     }
                     Spacer(minLength: 0)
                     Button(defaultBrowserController.isDefaultBrowser ? "Default" : "Make default") {
@@ -97,21 +186,7 @@ struct BrowserSettingsView: View {
                 }
             }
 
-            settingsSection("MEMORY") {
-                Picker("Suspend inactive tabs after", selection: $settings.tabSleepInterval) {
-                    Text("30 seconds").tag(TimeInterval(30))
-                    Text("1 minute").tag(TimeInterval(60))
-                    Text("5 minutes").tag(TimeInterval(300))
-                    Text("15 minutes").tag(TimeInterval(900))
-                }
-                .pickerStyle(.menu)
-                Text("Suspended tabs release their WebKit view and reload their last address when opened.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            settingsSection("NOTIFICATIONS") {
+            settingsSection("Notifications") {
                 HStack(spacing: 10) {
                     Image(systemName: notificationController.isAuthorized ? "bell.badge.fill" : "bell.slash")
                         .foregroundStyle(notificationController.isAuthorized ? Color.green : Color.secondary)
@@ -119,9 +194,7 @@ struct BrowserSettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(notificationController.isAuthorized ? "Mac notifications are enabled" : "Enable website notifications")
                             .font(.system(size: 13, weight: .medium, design: .rounded))
-                        Text(notificationController.statusDescription)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        caption(notificationController.statusDescription)
                     }
                     Spacer(minLength: 0)
                     if notificationController.isAuthorized {
@@ -137,35 +210,117 @@ struct BrowserSettingsView: View {
                             .buttonStyle(.bordered)
                     }
                 }
-                Text("Each website still asks for permission separately. Permissions are kept with its profile.")
+                caption("Each website still asks for permission separately. Permissions are kept with its profile.")
+            }
+        }
+    }
+
+    private var extensionSettings: some View {
+        Group {
+            settingsSection("Low-resource compatibility") {
+                Text("WebKit cannot run Chrome extensions, their scripts, popups, or service workers. Jungle imports only static Manifest V3 declarative block rules and compiles them into WebKit.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            settingsSection("PROFILES") {
-                ForEach(store.profiles) { profile in
-                    ProfileSettingsRow(profile: profile, store: store, canDelete: store.profiles.count > 1)
+            HStack {
+                Button(action: store.importChromeExtension) {
+                    Label("Import extension folder", systemImage: "folder.badge.plus")
                 }
-                Button(action: store.createProfile) {
-                    Label("Add profile", systemImage: "plus")
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(store.isExtensionImporting)
+
+                if store.isExtensionImporting {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Compiling rules…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.bordered)
-                .pointerCursor()
+            }
+
+            if let error = store.extensionImportError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if store.extensions.isEmpty {
+                ContentUnavailableView(
+                    "No extensions installed",
+                    systemImage: "puzzlepiece",
+                    description: Text("Import an unpacked Chrome Manifest V3 folder with declarative network rules."))
+                    .frame(maxWidth: .infinity, minHeight: 170)
+            } else {
+                ForEach(store.extensions) { browserExtension in
+                    extensionRow(browserExtension)
+                }
             }
         }
-        .frame(width: 386, alignment: .leading)
-        .padding(22)
-        .background(.regularMaterial)
-        .onAppear {
-            defaultBrowserController.refresh()
-            notificationController.refreshAuthorizationStatus()
+    }
+
+    private func extensionRow(_ browserExtension: BrowserExtension) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "shield.lefthalf.filled")
+                .foregroundStyle(.green)
+                .font(.title3)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(browserExtension.name)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                caption("v\(browserExtension.version) · \(browserExtension.ruleCount) WebKit rules")
+                if browserExtension.unsupportedRuleCount > 0 {
+                    Text("\(browserExtension.unsupportedRuleCount) Chrome-only rules were skipped")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+            Spacer(minLength: 8)
+            Toggle(
+                "Enable \(browserExtension.name)",
+                isOn: Binding(
+                    get: { browserExtension.isEnabled },
+                    set: { store.setExtensionEnabled($0, for: browserExtension.id) }
+                )
+            )
+            .toggleStyle(.switch)
+            .labelsHidden()
+            Button(role: .destructive) { store.removeExtension(browserExtension.id) } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove extension")
         }
+        .padding(12)
+        .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var profileSettings: some View {
+        settingsSection("Profiles") {
+            ForEach(store.profiles) { profile in
+                ProfileSettingsRow(profile: profile, store: store, canDelete: store.profiles.count > 1)
+            }
+            Button(action: store.createProfile) {
+                Label("Add profile", systemImage: "plus")
+            }
+            .buttonStyle(.bordered)
+            .pointerCursor()
+        }
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(title)
+            Text(title.uppercased())
                 .font(.caption2.weight(.bold))
                 .foregroundStyle(.secondary)
             content()
@@ -173,6 +328,46 @@ struct BrowserSettingsView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private enum SettingsCategory: String, CaseIterable, Identifiable {
+    case general
+    case workspace
+    case system
+    case extensions
+    case profiles
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .workspace: "Workspace"
+        case .system: "System"
+        case .extensions: "Extensions"
+        case .profiles: "Profiles"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: "slider.horizontal.3"
+        case .workspace: "rectangle.3.group"
+        case .system: "macbook"
+        case .extensions: "puzzlepiece.extension"
+        case .profiles: "person.2"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .general: "Search, new tabs, and appearance."
+        case .workspace: "Keep inactive tabs from using memory."
+        case .system: "Mac integration and website notifications."
+        case .extensions: "Manage compatible declarative WebKit rules."
+        case .profiles: "Separate workspaces, data, and bookmarks."
+        }
     }
 }
 

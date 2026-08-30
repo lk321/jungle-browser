@@ -55,6 +55,36 @@ struct BrowserTab: Identifiable, Equatable {
     }
 }
 
+/// A Chrome Manifest V3 package whose static network rules have been translated to
+/// WebKit content rules. It deliberately has no JavaScript execution surface.
+struct BrowserExtension: Identifiable, Codable, Equatable {
+    let id: UUID
+    let name: String
+    let version: String
+    let ruleCount: Int
+    let unsupportedRuleCount: Int
+    let ruleListIdentifier: String
+    var isEnabled: Bool
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        version: String,
+        ruleCount: Int,
+        unsupportedRuleCount: Int,
+        ruleListIdentifier: String,
+        isEnabled: Bool = true
+    ) {
+        self.id = id
+        self.name = name
+        self.version = version
+        self.ruleCount = ruleCount
+        self.unsupportedRuleCount = unsupportedRuleCount
+        self.ruleListIdentifier = ruleListIdentifier
+        self.isEnabled = isEnabled
+    }
+}
+
 struct AddressSuggestion: Identifiable, Hashable {
     let title: String
     let address: URL

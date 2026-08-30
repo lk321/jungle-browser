@@ -37,6 +37,7 @@ final class ContentBlocking {
     private let store = WKContentRuleListStore.default()
     private let defaults = UserDefaults.standard
     private var activeLists: [String: WKContentRuleList] = [:]
+    private var extensionLists: [String: WKContentRuleList] = [:]
     private var updateTask: Task<Void, Never>?
 
     private init() {}
@@ -60,7 +61,15 @@ final class ContentBlocking {
     }
 
     func install(on controller: WKUserContentController) {
-        activeLists.values.forEach(controller.add(_:))
+        allActiveLists.forEach(controller.add(_:))
+    }
+
+    /// Declarative extension rules share the same WebKit content-rule pipeline as
+    /// Jungle's built-in blocker. Replacing the whole set prevents stale rules from
+    /// surviving after an extension is disabled or removed.
+    func setExtensionRuleLists(_ lists: [String: WKContentRuleList]) {
+        extensionLists = lists
+        applyActiveLists()
     }
 
     private func restoreCachedLists() async {
@@ -168,7 +177,11 @@ final class ContentBlocking {
     }
 
     private func applyActiveLists() {
-        WebViewPool.shared.applyContentRuleLists(Array(activeLists.values))
+        WebViewPool.shared.applyContentRuleLists(allActiveLists)
+    }
+
+    private var allActiveLists: [WKContentRuleList] {
+        Array(activeLists.values) + Array(extensionLists.values)
     }
 
     private func deactivateList(key: String) {

@@ -30,9 +30,13 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var bookmarkFolders: [BookmarkFolder]
     @Published private(set) var history: [BrowsingHistoryEntry]
     @Published private(set) var downloads: [BrowserDownload]
+    @Published private(set) var extensions: [BrowserExtension]
+    @Published private(set) var isExtensionImporting = false
+    @Published private(set) var extensionImportError: String?
 
     let settings: BrowserSettings
     private let persistence: BrowserPersistence
+    private let extensionRuntime: ChromeDeclarativeExtensionRuntime
     private var housekeepingTask: Task<Void, Never>?
     private var tabPreviewTask: Task<Void, Never>?
     private var copiedAddressFeedbackTask: Task<Void, Never>?
@@ -48,6 +52,8 @@ final class BrowserStore: ObservableObject {
     init(settings: BrowserSettings? = nil, persistence: BrowserPersistence? = nil) {
         let resolvedPersistence = persistence ?? BrowserPersistence.shared
         self.persistence = resolvedPersistence
+        let resolvedExtensionRuntime = ChromeDeclarativeExtensionRuntime.shared
+        self.extensionRuntime = resolvedExtensionRuntime
         let browserSettings = settings ?? BrowserSettings(persistence: resolvedPersistence)
         self.settings = browserSettings
         let browserProfiles = resolvedPersistence.loadProfiles()
@@ -60,6 +66,7 @@ final class BrowserStore: ObservableObject {
         bookmarkFolders = resolvedPersistence.loadBookmarks(for: browserProfiles)
         history = resolvedPersistence.loadHistory()
         downloads = resolvedPersistence.loadDownloads()
+        extensions = resolvedExtensionRuntime.extensions
         settingsObserver = browserSettings.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -88,6 +95,7 @@ final class BrowserStore: ObservableObject {
                     self?.pictureInPictureDidChange(isActive: isActive, tabID: tabID)
                 }
             }
+        resolvedExtensionRuntime.start()
     }
 
     deinit {
@@ -264,6 +272,41 @@ final class BrowserStore: ObservableObject {
 
     func toggleSidebar() {
         isSidebarVisible.toggle()
+    }
+
+    func importChromeExtension() {
+        extensionImportError = nil
+        let panel = NSOpenPanel()
+        panel.title = "Import Chrome extension"
+        panel.message = "Choose the unpacked folder that contains manifest.json."
+        panel.prompt = "Import"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.begin { [weak self] response in
+            guard response == .OK, let directory = panel.url else { return }
+            Task { @MainActor [weak self] in
+                await self?.installChromeExtension(from: directory)
+            }
+        }
+    }
+
+    func setExtensionEnabled(_ isEnabled: Bool, for extensionID: UUID) {
+        guard let index = extensions.firstIndex(where: { $0.id == extensionID }) else { return }
+        extensions[index].isEnabled = isEnabled
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.extensionRuntime.setEnabled(isEnabled, for: extensionID)
+            self.extensions = self.extensionRuntime.extensions
+        }
+    }
+
+    func removeExtension(_ extensionID: UUID) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.extensionRuntime.remove(extensionID)
+            self.extensions = self.extensionRuntime.extensions
+        }
     }
 
     func navigate(to input: String) {
@@ -826,6 +869,17 @@ final class BrowserStore: ObservableObject {
 
     private func persistBookmarks() {
         persistence.saveBookmarks(bookmarkFolders)
+    }
+
+    private func installChromeExtension(from directory: URL) async {
+        isExtensionImporting = true
+        defer { isExtensionImporting = false }
+        do {
+            _ = try await extensionRuntime.install(from: directory)
+            extensions = extensionRuntime.extensions
+        } catch {
+            extensionImportError = error.localizedDescription
+        }
     }
 
     /// Every title, address and selection change lands here, and the write rewrites the whole

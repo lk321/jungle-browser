@@ -235,6 +235,48 @@ final class JungleTests: XCTestCase {
         XCTAssertFalse(BrowserAddress.isLocalDevelopmentURL(URL(string: "https://example.com") ?? BrowserAddress.home))
     }
 
+    func testChromeDeclarativeRulesOnlyTranslateSafeStaticBlockFilters() {
+        let compatibleRule = ChromeDeclarativeNetRequestRule(
+            action: .init(type: "block"),
+            condition: .init(
+                urlFilter: "||example.com^",
+                regexFilter: nil,
+                resourceTypes: ["script"],
+                excludedResourceTypes: nil,
+                domains: nil,
+                excludedDomains: nil
+            )
+        )
+        let scriptRule = ChromeDeclarativeNetRequestRule(
+            action: .init(type: "redirect"),
+            condition: .init(
+                urlFilter: "||example.com^",
+                regexFilter: nil,
+                resourceTypes: nil,
+                excludedResourceTypes: nil,
+                domains: nil,
+                excludedDomains: nil
+            )
+        )
+        let arbitraryRegexRule = ChromeDeclarativeNetRequestRule(
+            action: .init(type: "block"),
+            condition: .init(
+                urlFilter: nil,
+                regexFilter: ".*",
+                resourceTypes: nil,
+                excludedResourceTypes: nil,
+                domains: nil,
+                excludedDomains: nil
+            )
+        )
+
+        let compilation = ChromeDeclarativeRuleCompiler.compile([compatibleRule, scriptRule, arbitraryRegexRule])
+
+        XCTAssertEqual(compilation.ruleCount, 1)
+        XCTAssertEqual(compilation.unsupportedRuleCount, 2)
+        XCTAssertTrue(compilation.source.contains("example\\\\.com"))
+    }
+
     func testDeveloperDiagnosticsDecodesPageMetrics() {
         let encoded = """
         {"pageURL":"http://localhost:3000/","requestCount":12,"repeatedRequestCount":3,"transferredBytes":2048,"javaScriptHeapBytes":1024,"documentNodeCount":42,"loadDurationMilliseconds":120}
