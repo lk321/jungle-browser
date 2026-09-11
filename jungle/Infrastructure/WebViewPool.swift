@@ -22,20 +22,38 @@ final class WebViewPool {
         // switched off, and neither has a public setter. These two keys are the whole difference.
         configuration.preferences.setValue(true, forKey: "allowsPictureInPictureMediaPlayback")
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        // Camera, microphone, WebRTC and screen sharing. WKWebView keeps these behind private
+        // feature flags, so each one is written only if this WebKit still answers to it.
+        ["mediaDevicesEnabled", "mediaStreamEnabled", "peerConnectionEnabled", "screenCaptureEnabled"]
+            .forEach { Self.enablePrivatePreference($0, on: configuration.preferences) }
         configuration.userContentController.add(MediaMessageHandler(tabID: tab.id), contentWorld: .defaultClient, name: "jungleMedia")
         configuration.userContentController.add(
             DeveloperMetricsMessageHandler(tabID: tab.id),
             contentWorld: .defaultClient,
             name: DeveloperDiagnostics.messageHandlerName
         )
+        configuration.userContentController.add(
+            ContextMenuMessageHandler(),
+            contentWorld: .defaultClient,
+            name: JungleWebView.contextMenuHandlerName
+        )
+        // The website notification API lives in the page's own world: a page cannot see the
+        // client world, and an API it cannot see is an API it cannot use.
+        configuration.userContentController.add(
+            NotificationMessageHandler(),
+            contentWorld: .page,
+            name: WebNotifications.handlerName
+        )
+        configuration.userContentController.addUserScript(WebNotifications.userScript)
         configuration.userContentController.addUserScript(Self.mediaScript)
+        configuration.userContentController.addUserScript(JungleWebView.contextMenuScript)
         configuration.userContentController.addUserScript(DeveloperDiagnostics.userScript)
         configuration.userContentController.addUserScript(LinkPrewarming.userScript)
         configuration.userContentController.addUserScript(YouTubeAdBlocking.userScript)
         configuration.userContentController.addUserScript(YouTubeAdBlocking.playerScript)
         ContentBlocking.shared.install(on: configuration.userContentController)
 
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = JungleWebView(frame: .zero, configuration: configuration)
         applyContentBackground(isDark: isDark ?? systemAppearanceIsDark, to: webView)
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
         webView.allowsBackForwardNavigationGestures = true
@@ -62,6 +80,16 @@ final class WebViewPool {
         hostView.addSubview(webView)
         hostViews[tab.id] = hostView
         return hostView
+    }
+
+    /// Writes a private WebKit preference, and does nothing if this WebKit has dropped it:
+    /// an unknown key would otherwise raise an Objective-C exception Swift cannot catch.
+    private static func enablePrivatePreference(_ key: String, on preferences: WKPreferences) {
+        let capitalized = key.prefix(1).uppercased() + key.dropFirst()
+        guard preferences.responds(to: NSSelectorFromString("set\(capitalized):"))
+            || preferences.responds(to: NSSelectorFromString("_set\(capitalized):"))
+        else { return }
+        preferences.setValue(true, forKey: key)
     }
 
     func contains(_ tabID: UUID) -> Bool { webViews[tabID] != nil }
@@ -102,6 +130,19 @@ final class WebViewPool {
         await evaluateBoolean("__jungleMedia.exitPictureInPicture()", in: tabID)
     }
 
+    /// The last mute the tab was told to apply, kept so a caller can tell whether a resumed
+    /// or reloaded document has been re-muted yet.
+    private(set) var appliedMuteStates: [UUID: Bool] = [:]
+
+    func forgetAppliedMuteState(for tabID: UUID) {
+        appliedMuteStates.removeValue(forKey: tabID)
+    }
+
+    func setMuted(_ muted: Bool, in tabID: UUID) {
+        appliedMuteStates[tabID] = muted
+        evaluate("__jungleMedia.setMuted(\(muted))", in: tabID)
+    }
+
     func applyContentBackground(isDark: Bool, to webView: WKWebView) {
         let backgroundColor = Self.contentBackground(isDark: isDark)
         webView.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
@@ -139,6 +180,7 @@ final class WebViewPool {
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
         webView.removeFromSuperview()
+        appliedMuteStates.removeValue(forKey: tabID)
         hostViews.removeValue(forKey: tabID)?.removeFromSuperview()
     }
 
@@ -221,7 +263,51 @@ final class WebViewPool {
                 ) || null;
             }
 
+            let muted = false;
+            let reportedAudible = null;
+
+            function mediaElements() {
+                return document.querySelectorAll('video, audio');
+            }
+
+            // Deliberately ignores `muted`: a muted tab still needs its speaker control on
+            // screen so the user can turn the sound back on.
+            function isAudible(media) {
+                return !media.paused && !media.ended && media.volume > 0;
+            }
+
+            function applyMuted() {
+                // Only write when it differs, or the volumechange listener below re-enters.
+                Array.prototype.forEach.call(mediaElements(), function (media) {
+                    if (media.muted !== muted) { media.muted = muted; }
+                });
+            }
+
+            function reportAudio() {
+                const audible = Array.prototype.some.call(mediaElements(), isAudible);
+                if (audible === reportedAudible) { return; }
+                reportedAudible = audible;
+                window.webkit.messageHandlers.jungleMedia.postMessage({
+                    type: 'audioDidChange',
+                    isAudible: audible
+                });
+            }
+
+            // A page swaps its media elements as it plays through a playlist, so every new
+            // element has to inherit the tab's mute rather than start unmuted.
+            ['play', 'playing', 'pause', 'ended', 'volumechange', 'emptied', 'loadstart'].forEach(function (name) {
+                document.addEventListener(name, function () {
+                    applyMuted();
+                    reportAudio();
+                }, true);
+            });
+
             window.__jungleMedia = {
+                setMuted: function (value) {
+                    muted = value === true;
+                    applyMuted();
+                    return muted;
+                },
                 enterPictureInPicture: function () {
                     if (pictureInPictureVideo()) { return true; }
                     const video = playingVideo();
@@ -264,14 +350,24 @@ private final class MediaMessageHandler: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any],
-              body["type"] as? String == "pictureInPictureDidChange",
-              let isActive = body["isActive"] as? Bool
-        else { return }
-        NotificationCenter.default.post(
-            name: .junglePictureInPictureDidChange,
-            object: nil,
-            userInfo: ["tabID": tabID, "isActive": isActive]
-        )
+        guard let body = message.body as? [String: Any] else { return }
+        switch body["type"] as? String {
+        case "pictureInPictureDidChange":
+            guard let isActive = body["isActive"] as? Bool else { return }
+            NotificationCenter.default.post(
+                name: .junglePictureInPictureDidChange,
+                object: nil,
+                userInfo: ["tabID": tabID, "isActive": isActive]
+            )
+        case "audioDidChange":
+            guard let isAudible = body["isAudible"] as? Bool else { return }
+            NotificationCenter.default.post(
+                name: .jungleAudioDidChange,
+                object: nil,
+                userInfo: ["tabID": tabID, "isAudible": isAudible]
+            )
+        default:
+            return
+        }
     }
 }

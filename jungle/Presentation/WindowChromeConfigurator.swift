@@ -48,6 +48,10 @@ private final class WindowChromeView: NSView {
         // Interactive sidebar content owns pointer drags. Letting AppKit treat the entire
         // transparent surface as a window drag region races SwiftUI's drop gestures.
         window.isMovableByWindowBackground = false
+        // The sidebar's material blends with what is behind the window, which an opaque
+        // window never lets through: without these two the glass renders as flat gray.
+        window.isOpaque = false
+        window.backgroundColor = .clear
         window.standardWindowButton(.closeButton)?.isHidden = !trafficLightsVisible
         window.standardWindowButton(.miniaturizeButton)?.isHidden = !trafficLightsVisible
         window.standardWindowButton(.zoomButton)?.isHidden = !trafficLightsVisible

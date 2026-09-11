@@ -5,12 +5,16 @@ struct BrowserBookmark: Identifiable, Codable, Hashable {
     let title: String
     let address: URL
     let symbol: String
+    /// An SF Symbol the user picked for this saved page. It wins over the site's favicon;
+    /// `nil` leaves the favicon in charge. Optional so the legacy JSON still decodes.
+    var customSymbol: String?
 
-    init(id: UUID = UUID(), title: String, address: URL, symbol: String = "globe") {
+    init(id: UUID = UUID(), title: String, address: URL, symbol: String = "globe", customSymbol: String? = nil) {
         self.id = id
         self.title = title
         self.address = address
         self.symbol = symbol
+        self.customSymbol = customSymbol
     }
 }
 

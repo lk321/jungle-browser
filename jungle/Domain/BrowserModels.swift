@@ -95,11 +95,13 @@ struct AddressSuggestion: Identifiable, Hashable {
     enum Source: Hashable {
         case tab
         case bookmark
+        case history
 
         var symbol: String {
             switch self {
             case .tab: "rectangle.on.rectangle"
             case .bookmark: "bookmark.fill"
+            case .history: "clock.arrow.circlepath"
             }
         }
 
@@ -107,6 +109,7 @@ struct AddressSuggestion: Identifiable, Hashable {
             switch self {
             case .tab: "Open tab"
             case .bookmark: "Saved page"
+            case .history: "Visited"
             }
         }
     }
@@ -214,6 +217,13 @@ extension BrowserTab {
     var isNativeNewTab: Bool { BrowserAddress.isNativeNewTab(address) }
 }
 
+/// A framework or library observed in the live page, paired with the signal that revealed
+/// it: the toolbar shows the reason so a detection is never mistaken for a guess.
+struct DetectedTechnology: Equatable {
+    let name: String
+    let detail: String
+}
+
 struct DeveloperMetrics: Equatable {
     let pageURL: URL
     let requestCount: Int
@@ -222,6 +232,7 @@ struct DeveloperMetrics: Equatable {
     let javaScriptHeapBytes: Int64?
     let documentNodeCount: Int
     let loadDurationMilliseconds: Int?
+    let technologies: [DetectedTechnology]
 
     static let empty = DeveloperMetrics(
         pageURL: BrowserAddress.home,
@@ -230,6 +241,7 @@ struct DeveloperMetrics: Equatable {
         transferredBytes: 0,
         javaScriptHeapBytes: nil,
         documentNodeCount: 0,
-        loadDurationMilliseconds: nil
+        loadDurationMilliseconds: nil,
+        technologies: []
     )
 }

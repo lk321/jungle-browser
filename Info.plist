@@ -32,5 +32,9 @@
             </array>
         </dict>
     </array>
+    <key>NSCameraUsageDescription</key>
+    <string>Websites you open in Jungle can use the camera for video calls.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Websites you open in Jungle can use the microphone for calls and voice input.</string>
 </dict>
 </plist>

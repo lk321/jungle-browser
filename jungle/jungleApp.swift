@@ -11,10 +11,14 @@ import SwiftUI
 struct JungleApp: App {
     init() {
         ApplicationIconController.update(for: .system)
+        WebNotifications.install()
     }
 
+    // A `WindowGroup` opens a second instance for every incoming `http(s)` URL, which put a
+    // duplicate window on screen next to the browser. Two windows were never workable anyway:
+    // each carries its own `BrowserStore` over one shared `WebViewPool` and database.
     var body: some Scene {
-        WindowGroup {
+        Window("Jungle", id: "jungle") {
             BrowserWorkspaceView()
                 .ignoresSafeArea()
                 .background(WindowChromeConfigurator())
@@ -106,6 +110,7 @@ struct JungleApp: App {
 
 extension Notification.Name {
     static let jungleNewTab = Notification.Name("jungle.new-tab")
+    static let jungleFocusTab = Notification.Name("jungle.focus-tab")
     static let jungleCloseTab = Notification.Name("jungle.close-tab")
     static let jungleCommandPalette = Notification.Name("jungle.command-palette")
     static let jungleBeginTabCycle = Notification.Name("jungle.begin-tab-cycle")
@@ -126,7 +131,9 @@ extension Notification.Name {
     static let jungleReloadIgnoringCache = Notification.Name("jungle.reload-ignoring-cache")
     static let jungleTogglePictureInPicture = Notification.Name("jungle.toggle-picture-in-picture")
     static let junglePictureInPictureDidChange = Notification.Name("jungle.picture-in-picture-did-change")
+    static let jungleAudioDidChange = Notification.Name("jungle.audio-did-change")
     static let jungleToggleWebInspector = Notification.Name("jungle.toggle-web-inspector")
     static let jungleShowJavaScriptConsole = Notification.Name("jungle.show-javascript-console")
     static let jungleDeveloperMetricsDidUpdate = Notification.Name("jungle.developer-metrics-did-update")
+    static let jungleFirstContentfulPaint = Notification.Name("jungle.first-contentful-paint")
 }

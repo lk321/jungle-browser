@@ -69,9 +69,10 @@ struct BrowserWebView: NSViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKDownloadDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, ContextMenuDownloadStarter {
         let store: BrowserStore
         private var loadingObservations: [UUID: NSKeyValueObservation] = [:]
+        private var addressObservations: [UUID: NSKeyValueObservation] = [:]
         private var observedWebViewIDs: [UUID: ObjectIdentifier] = [:]
         private var downloadIDs: [ObjectIdentifier: UUID] = [:]
 
@@ -81,12 +82,23 @@ struct BrowserWebView: NSViewRepresentable {
 
         func attach(to webView: WKWebView, tabID: UUID) {
             if webView.navigationDelegate !== self { webView.navigationDelegate = self }
+            if webView.uiDelegate !== self { webView.uiDelegate = self }
+            (webView as? JungleWebView)?.downloadStarter = self
             guard observedWebViewIDs[tabID] != ObjectIdentifier(webView) else { return }
             observedWebViewIDs[tabID] = ObjectIdentifier(webView)
             loadingObservations[tabID] = webView.observe(\WKWebView.isLoading, options: [.initial, .new]) { [weak self] webView, change in
                 let isLoading = change.newValue ?? webView.isLoading
                 Task { @MainActor [weak self] in
                     self?.store.setNavigationLoading(isLoading, for: tabID)
+                }
+            }
+            // `didCommit` never fires for a same-document navigation, which is how YouTube and
+            // every other pushState app moves between pages. Observing the property covers
+            // both kinds of navigation with one mechanism.
+            addressObservations[tabID] = webView.observe(\WKWebView.url, options: [.new]) { [weak self] webView, _ in
+                let url = webView.url
+                Task { @MainActor [weak self] in
+                    self?.store.didCommitNavigation(for: tabID, url: url)
                 }
             }
         }
@@ -96,8 +108,64 @@ struct BrowserWebView: NSViewRepresentable {
         private func tabID(of webView: WKWebView) -> UUID? { WebViewPool.shared.tabID(for: webView) }
 
         func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            WebNotifications.shared.seedPermission(in: webView)
             guard let tabID = tabID(of: webView) else { return }
             store.didCommitNavigation(for: tabID, url: webView.url)
+        }
+
+        /// Camera and microphone. Without this the request never reaches anyone and WebKit
+        /// leaves the page waiting, which is what made every video call arrive mute and blind.
+        func webView(
+            _ webView: WKWebView,
+            requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+            initiatedByFrame frame: WKFrameInfo,
+            type: WKMediaCaptureType,
+            decisionHandler: @escaping (WKPermissionDecision) -> Void
+        ) {
+            let kinds: [SitePermissions.Kind] = switch type {
+            case .camera: [.camera]
+            case .microphone: [.microphone]
+            default: [.camera, .microphone]
+            }
+            let origin = SitePermissions.describe(origin)
+            Task { @MainActor in
+                let allowed = await SitePermissions.request(kinds, origin: origin, in: webView.window)
+                decisionHandler(allowed ? .grant : .deny)
+            }
+        }
+
+        /// Screen sharing. `getDisplayMedia` is only offered over this private delegate method,
+        /// and the decision tells WebKit which of its own pickers to put up.
+        ///
+        /// ponytail: the answer is never remembered, same as in Chrome and Safari — sharing a
+        /// screen is the one permission worth asking for every single time.
+        ///
+        /// Known gap: WebKit answers `respondsToSelector:` for this method and the
+        /// `screenCaptureEnabled` preference is on, yet a sandboxed build never sees the call —
+        /// `getDisplayMedia` stalls inside the web process with no permission request, no
+        /// prompt and no rejection. Camera and microphone go through the public delegate on the
+        /// same build. Next step is a throwaway unsandboxed build to confirm the App Sandbox is
+        /// what swallows it.
+        @objc(_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:)
+        func requestDisplayCapturePermission(
+            _ webView: WKWebView,
+            origin: WKSecurityOrigin,
+            initiatedByFrame frame: WKFrameInfo,
+            withSystemAudio: Bool,
+            decisionHandler: @escaping (Int) -> Void
+        ) {
+            let origin = SitePermissions.describe(origin)
+            Task { @MainActor in
+                let choice = await SitePermissions.ask(
+                    "\u{201C}\(origin)\u{201D} wants to share your screen.",
+                    information: "You pick the screen or the window to share next.",
+                    buttons: ["Share Screen", "Share a Window", "Cancel"],
+                    in: webView.window
+                )
+                // WKDisplayCapturePermissionDecision: deny, prompt for a screen, prompt for a window.
+                let decisions = [1, 2, 0]
+                decisionHandler(decisions.indices.contains(choice) ? decisions[choice] : 0)
+            }
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -127,6 +195,27 @@ struct BrowserWebView: NSViewRepresentable {
             decisionHandler(.cancel)
             guard let tabID = tabID(of: webView) else { return }
             store.openLinkInNewTab(destination, from: tabID)
+        }
+
+        /// A `target="_blank"` link or a `window.open` used to do nothing at all: WebKit asks
+        /// its UI delegate for a window to put the page in, and there was no UI delegate. Every
+        /// one of those now lands in a tab, which is what a command-click already did.
+        ///
+        /// ponytail: a popup opened at `about:blank` for the page to write into is dropped,
+        /// because serving one needs a second web view built from this configuration. Add it
+        /// if a site that matters actually needs it.
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            guard let destination = navigationAction.request.url,
+                  BrowserAddress.isWebURL(destination),
+                  let tabID = tabID(of: webView)
+            else { return nil }
+            store.openLinkInNewTab(destination, from: tabID)
+            return nil
         }
 
         func webView(
@@ -198,6 +287,15 @@ struct BrowserWebView: NSViewRepresentable {
         func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
             guard let downloadID = downloadIDs.removeValue(forKey: ObjectIdentifier(download)) else { return }
             store.failDownload(downloadID, errorDescription: error.localizedDescription)
+        }
+
+        /// WebKit's own context-menu download never reaches the app, so the menu item hands
+        /// the address back here and the download is started over public API instead.
+        func startContextMenuDownload(from address: URL, in webView: WKWebView) {
+            let tabID = tabID(of: webView)
+            webView.startDownload(using: URLRequest(url: address)) { [weak self] download in
+                self?.configure(download: download, sourceAddress: address, tabID: tabID)
+            }
         }
 
         private func configure(download: WKDownload, sourceAddress: URL?, tabID: UUID?) {

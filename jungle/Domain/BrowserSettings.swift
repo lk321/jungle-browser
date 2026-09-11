@@ -129,7 +129,13 @@ final class BrowserSettings: ObservableObject {
     @Published var customNewTabAddress: String { didSet { save() } }
     @Published var appearance: BrowserAppearance { didSet { save() } }
     @Published var tabSleepInterval: TimeInterval { didSet { save() } }
+    @Published var sidebarWidth: CGFloat { didSet { save() } }
     private let persistence: BrowserPersistence
+
+    /// How long a tab may sit untouched before its web process is released. One minute meant a
+    /// tab you looked away from came back as a cold network load; five is still bounded but
+    /// survives an ordinary detour. The Memory setting overrides it in either direction.
+    nonisolated static let defaultTabSleepInterval: TimeInterval = 300
 
     init(persistence: BrowserPersistence? = nil) {
         let resolvedPersistence = persistence ?? BrowserPersistence.shared
@@ -139,7 +145,10 @@ final class BrowserSettings: ObservableObject {
         newTabDestination = BrowserNewTabDestination(rawValue: saved.newTabDestination ?? "") ?? .searchEngine
         customNewTabAddress = saved.customNewTabAddress ?? ""
         appearance = BrowserAppearance(rawValue: saved.appearance) ?? .system
-        tabSleepInterval = saved.tabSleepInterval > 0 ? saved.tabSleepInterval : 60
+        tabSleepInterval = saved.tabSleepInterval > 0 ? saved.tabSleepInterval : Self.defaultTabSleepInterval
+        // Anything the store hands back is snapped: a width between steps would leave the
+        // sidebar in a layout no step describes.
+        sidebarWidth = SidebarStep.nearest(to: saved.sidebarWidth.map { CGFloat($0) } ?? SidebarStep.full.width).width
     }
 
     var newTabURL: URL {
@@ -152,7 +161,8 @@ final class BrowserSettings: ObservableObject {
             newTabDestination: newTabDestination,
             customNewTabAddress: customNewTabAddress,
             appearance: appearance,
-            tabSleepInterval: tabSleepInterval
+            tabSleepInterval: tabSleepInterval,
+            sidebarWidth: sidebarWidth
         )
     }
 }

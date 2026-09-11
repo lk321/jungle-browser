@@ -21,12 +21,18 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var copiedScreenshotTabID: UUID?
     @Published private(set) var developerMetricsByTabID: [UUID: DeveloperMetrics] = [:]
     @Published private(set) var initialContentReadyTabIDs: Set<UUID> = []
+    @Published private(set) var audibleTabIDs: Set<UUID> = []
+    @Published private(set) var mutedTabIDs: Set<UUID> = []
     /// The tab whose video WebKit is showing in its floating window.
     @Published private(set) var pictureInPictureTabID: UUID?
     /// The tab we just asked for Picture in Picture. Its web view has to stay in the window
     /// until the page answers, because WebKit tears the floating window down the moment the
     /// view that owns the video leaves the window.
     @Published private(set) var pictureInPictureRequestTabID: UUID?
+    /// Quick Access opens a saved page in place instead of adding a row to the tab list:
+    /// bookmark id to the tab it owns. Kept out of persistence, so a relaunch starts with
+    /// every tile closed.
+    @Published private(set) var quickAccessTabIDs: [UUID: UUID] = [:]
     @Published private(set) var bookmarkFolders: [BookmarkFolder]
     @Published private(set) var history: [BrowsingHistoryEntry]
     @Published private(set) var downloads: [BrowserDownload]
@@ -43,6 +49,8 @@ final class BrowserStore: ObservableObject {
     private var copiedScreenshotFeedbackTask: Task<Void, Never>?
     private var closingTabTasks: [UUID: Task<Void, Never>] = [:]
     private var pictureInPictureObserver: AnyCancellable?
+    private var audioObserver: AnyCancellable?
+    private var firstContentfulPaintObserver: AnyCancellable?
     private var persistWorkspaceTask: Task<Void, Never>?
     private var terminationObserver: AnyCancellable?
     private var settingsObserver: AnyCancellable?
@@ -78,7 +86,7 @@ final class BrowserStore: ObservableObject {
                     guard let self else { return }
                     self.persistWorkspaceTask?.cancel()
                     self.persistence.saveWorkspace(
-                        tabs: self.tabs,
+                        tabs: self.persistableTabs,
                         profiles: self.profiles,
                         activeProfileID: self.activeProfileID,
                         selectedTabID: self.selectedTabID
@@ -93,6 +101,24 @@ final class BrowserStore: ObservableObject {
                 else { return }
                 Task { @MainActor [weak self] in
                     self?.pictureInPictureDidChange(isActive: isActive, tabID: tabID)
+                }
+            }
+        audioObserver = NotificationCenter.default
+            .publisher(for: .jungleAudioDidChange)
+            .sink { [weak self] notification in
+                guard let tabID = notification.userInfo?["tabID"] as? UUID,
+                      let isAudible = notification.userInfo?["isAudible"] as? Bool
+                else { return }
+                Task { @MainActor [weak self] in
+                    self?.audioDidChange(isAudible: isAudible, for: tabID)
+                }
+            }
+        firstContentfulPaintObserver = NotificationCenter.default
+            .publisher(for: .jungleFirstContentfulPaint)
+            .sink { [weak self] notification in
+                guard let tabID = notification.userInfo?["tabID"] as? UUID else { return }
+                Task { @MainActor [weak self] in
+                    self?.didPaintFirstContent(for: tabID)
                 }
             }
         resolvedExtensionRuntime.start()
@@ -111,6 +137,13 @@ final class BrowserStore: ObservableObject {
     var selectedTab: BrowserTab? { tabs.first(where: { $0.id == selectedTabID }) }
     var selectedTabAddressText: String { selectedTab?.isNativeNewTab == true ? "" : selectedTab?.address.absoluteString ?? "" }
     var visibleTabs: [BrowserTab] { tabs.filter { $0.profileID == activeProfileID } }
+    /// The tabs the sidebar lists. A tab a Quick Access tile owns lives on its tile instead,
+    /// and comes back to the list if its saved page ever leaves Quick Access.
+    var listedTabs: [BrowserTab] { visibleTabs.filter { !quickAccessTabIDSet.contains($0.id) } }
+    private var quickAccessTabIDSet: Set<UUID> {
+        let bookmarkIDs = Set(bookmarkFolders.filter(\.isQuickAccess).flatMap(\.bookmarks).map(\.id))
+        return Set(quickAccessTabIDs.filter { bookmarkIDs.contains($0.key) }.values)
+    }
     var visibleHistory: [BrowsingHistoryEntry] { history.filter { $0.profileID == activeProfileID } }
     var visibleDownloads: [BrowserDownload] { downloads.filter { $0.profileID == activeProfileID } }
     var visibleBookmarkFolders: [BookmarkFolder] { bookmarkFolders.filter { $0.profileID == activeProfileID } }
@@ -173,6 +206,9 @@ final class BrowserStore: ObservableObject {
         initialContentReadyTabIDs.remove(tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
+        audibleTabIDs.remove(tabID)
+        mutedTabIDs.remove(tabID)
+        quickAccessTabIDs = quickAccessTabIDs.filter { $0.value != tabID }
         if copiedScreenshotTabID == tabID { copiedScreenshotTabID = nil }
         releasePictureInPicture(for: tabID)
         WebViewPool.shared.discard(tabID)
@@ -253,6 +289,7 @@ final class BrowserStore: ObservableObject {
             WebViewPool.shared.discard($0.id)
         }
         tabs.removeAll { $0.profileID == profileID }
+        quickAccessTabIDs = quickAccessTabIDs.filter { entry in tabs.contains(where: { $0.id == entry.value }) }
         bookmarkFolders.removeAll { $0.profileID == profileID }
         profiles.remove(at: index)
         if activeProfileID == profileID {
@@ -382,6 +419,35 @@ final class BrowserStore: ObservableObject {
         loadingTabIDs.remove(tabID)
     }
 
+    /// The tab a Quick Access tile is showing right now, or `nil` when the tile is closed.
+    func quickAccessTabID(for bookmarkID: UUID) -> UUID? {
+        guard let tabID = quickAccessTabIDs[bookmarkID], tabs.contains(where: { $0.id == tabID }) else { return nil }
+        return tabID
+    }
+
+    func isQuickAccessBookmarkActive(_ bookmarkID: UUID) -> Bool {
+        guard let tabID = quickAccessTabID(for: bookmarkID) else { return false }
+        return tabID == selectedTabID
+    }
+
+    /// Opens the saved page on its own tile rather than in a new row of the tab list. A tile
+    /// that is already open is selected again instead of opening a second copy.
+    func openQuickAccessBookmark(_ bookmark: BrowserBookmark) {
+        if let tabID = quickAccessTabID(for: bookmark.id) {
+            select(tabID)
+            return
+        }
+        let tab = BrowserTab(profileID: activeProfileID, address: bookmark.address, title: bookmark.title)
+        tabs.append(tab)
+        quickAccessTabIDs[bookmark.id] = tab.id
+        select(tab.id)
+    }
+
+    func closeQuickAccessBookmark(_ bookmarkID: UUID) {
+        guard let tabID = quickAccessTabID(for: bookmarkID) else { return }
+        close(tabID)
+    }
+
     func openBookmark(_ bookmark: BrowserBookmark) {
         let tab = BrowserTab(
             profileID: activeProfileID,
@@ -485,23 +551,12 @@ final class BrowserStore: ObservableObject {
     }
 
     func addressSuggestions(for input: String) -> [AddressSuggestion] {
-        let query = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard query.count >= 2 else { return [] }
-
-        let tabCandidates = visibleTabs.map { AddressSuggestion(title: $0.title, address: $0.address, source: .tab) }
-        let bookmarkCandidates = bookmarkFolders.flatMap(\.bookmarks).map {
-            AddressSuggestion(title: $0.title, address: $0.address, source: .bookmark)
-        }
-        let matching = (tabCandidates + bookmarkCandidates).filter { suggestion in
-            suggestion.title.localizedCaseInsensitiveContains(query)
-                || suggestion.address.host?.localizedCaseInsensitiveContains(query) == true
-                || suggestion.address.absoluteString.localizedCaseInsensitiveContains(query)
-        }
-        let ranked = matching.sorted { lhs, rhs in
-            suggestionScore(lhs, query: query) > suggestionScore(rhs, query: query)
-        }
-        var seen = Set<URL>()
-        return ranked.filter { seen.insert($0.address).inserted }.prefix(5).map { $0 }
+        Self.rankedAddressSuggestions(
+            for: input,
+            tabs: visibleTabs,
+            bookmarks: visibleBookmarkFolders.flatMap(\.bookmarks),
+            history: visibleHistory
+        )
     }
 
     func smartAddressSuggestions(for input: String) -> [SmartAddressSuggestion] {
@@ -607,6 +662,15 @@ final class BrowserStore: ObservableObject {
         persistBookmarks()
     }
 
+    /// `nil` hands the tile back to the site's favicon.
+    func setBookmarkSymbol(_ symbol: String?, for bookmarkID: UUID, in folderID: UUID) {
+        guard let folderIndex = bookmarkFolders.firstIndex(where: { $0.id == folderID && $0.profileID == activeProfileID }),
+              let bookmarkIndex = bookmarkFolders[folderIndex].bookmarks.firstIndex(where: { $0.id == bookmarkID })
+        else { return }
+        bookmarkFolders[folderIndex].bookmarks[bookmarkIndex].customSymbol = symbol
+        persistBookmarks()
+    }
+
     func deleteBookmark(_ bookmarkID: UUID, from folderID: UUID) {
         guard let index = bookmarkFolders.firstIndex(where: { $0.id == folderID && $0.profileID == activeProfileID }) else { return }
         bookmarkFolders[index].bookmarks.removeAll { $0.id == bookmarkID }
@@ -684,6 +748,22 @@ final class BrowserStore: ObservableObject {
     }
     func togglePinned(_ tabID: UUID) { update(tabID) { $0.isPinned.toggle() } }
 
+    func isAudible(_ tabID: UUID) -> Bool { audibleTabIDs.contains(tabID) }
+
+    func isMuted(_ tabID: UUID) -> Bool { mutedTabIDs.contains(tabID) }
+
+    func toggleMuted(_ tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        let shouldMute = !mutedTabIDs.contains(tabID)
+        if shouldMute { mutedTabIDs.insert(tabID) } else { mutedTabIDs.remove(tabID) }
+        WebViewPool.shared.setMuted(shouldMute, in: tabID)
+    }
+
+    private func audioDidChange(isAudible: Bool, for tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        if isAudible { audibleTabIDs.insert(tabID) } else { audibleTabIDs.remove(tabID) }
+    }
+
     func didCommitNavigation(for tabID: UUID, url: URL?) {
         if let url { update(tabID) { $0.address = url } }
     }
@@ -691,13 +771,27 @@ final class BrowserStore: ObservableObject {
     func didStartNavigation(for tabID: UUID) {
         // A new document takes the video, and its floating window, with it.
         releasePictureInPicture(for: tabID)
+        audibleTabIDs.remove(tabID)
         setNavigationLoading(true, for: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
     }
 
+    /// Uncovers the web view as soon as the document has painted. Load completion arrives much
+    /// later on a content-heavy page — measured at 3.1s after first paint on a Wikipedia
+    /// article — and keeping the cover up until then is what made navigation feel slow.
+    func didPaintFirstContent(for tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID && !$0.isSuspended }) else { return }
+        initialContentReadyTabIDs.insert(tabID)
+    }
+
     func didFinishNavigation(for tabID: UUID, title: String?, url: URL?) {
         setNavigationLoading(false, for: tabID)
+        // ponytail: still the reveal of last resort. A document that never reports a
+        // contentful paint — a PDF, an image, an empty response — has no other signal.
         initialContentReadyTabIDs.insert(tabID)
+        // A new document means a freshly injected script, which starts unmuted. This runs
+        // ahead of the web-URL guard below: a tab resumed from suspension needs it too.
+        if mutedTabIDs.contains(tabID) { WebViewPool.shared.setMuted(true, in: tabID) }
         update(tabID) { tab in
             if let url { tab.address = url }
             let candidate = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -718,6 +812,7 @@ final class BrowserStore: ObservableObject {
 
     func didTerminateWebContent(for tabID: UUID) {
         releasePictureInPicture(for: tabID)
+        audibleTabIDs.remove(tabID)
         setNavigationLoading(false, for: tabID)
         initialContentReadyTabIDs.remove(tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
@@ -828,6 +923,7 @@ final class BrowserStore: ObservableObject {
     private func suspend(_ tabID: UUID) {
         guard tabs.contains(where: { $0.id == tabID && !$0.isSuspended }) else { return }
         releasePictureInPicture(for: tabID)
+        audibleTabIDs.remove(tabID)
         update(tabID) { $0.isSuspended = true }
         loadingTabIDs.remove(tabID)
         initialContentReadyTabIDs.remove(tabID)
@@ -890,7 +986,7 @@ final class BrowserStore: ObservableObject {
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled, let self else { return }
             self.persistence.saveWorkspace(
-                tabs: self.tabs,
+                tabs: self.persistableTabs,
                 profiles: self.profiles,
                 activeProfileID: self.activeProfileID,
                 selectedTabID: self.selectedTabID
@@ -898,17 +994,17 @@ final class BrowserStore: ObservableObject {
         }
     }
 
+    /// A tile's tab belongs to its tile, not to the tab list, so it is left out of the saved
+    /// workspace. `loadWorkspace` already falls back when the saved selection is missing.
+    private var persistableTabs: [BrowserTab] {
+        let ownedTabIDs = Set(quickAccessTabIDs.values)
+        return tabs.filter { !ownedTabIDs.contains($0.id) }
+    }
+
     private func persistProfiles() {
         persistence.saveProfiles(profiles)
     }
 
-    private func suggestionScore(_ suggestion: AddressSuggestion, query: String) -> Int {
-        let title = suggestion.title.lowercased()
-        let host = suggestion.address.host?.lowercased() ?? ""
-        if title.hasPrefix(query) || host.hasPrefix(query) { return 3 }
-        if suggestion.source == .tab { return 2 }
-        return 1
-    }
 
     private func sanitizedFileName(_ proposedName: String) -> String {
         let fileName = URL(fileURLWithPath: proposedName).lastPathComponent
@@ -929,5 +1025,139 @@ final class BrowserStore: ObservableObject {
             if !fileManager.fileExists(atPath: candidate.path) { return candidate }
         }
         return directory.appendingPathComponent("\(UUID().uuidString)-\(fileName)")
+    }
+}
+
+// MARK: - Smart address bar
+
+extension BrowserStore {
+    /// Ranks what the user is typing against open tabs, saved pages and browsing history.
+    /// Static and `now`-injected so the ordering is testable without a live store, mirroring
+    /// `idleTabs(in:cutoff:selectedTabID:)`.
+    /// ponytail: a linear scan over the 1000 retained visits, with no index and no cache. That
+    /// is microseconds per keystroke and costs nothing when the address bar is closed. Upgrade
+    /// path, only if history ever stops being capped: a prefix index kept in BrowserPersistence.
+    static func rankedAddressSuggestions(
+        for input: String,
+        tabs: [BrowserTab],
+        bookmarks: [BrowserBookmark],
+        history: [BrowsingHistoryEntry],
+        now: Date = .now,
+        limit: Int = 6
+    ) -> [AddressSuggestion] {
+        let query = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard query.count >= 2 else { return [] }
+
+        // History holds one row per visit, so match first and aggregate only the survivors:
+        // a full [URL: visits] map would cost the whole retained history on every keystroke.
+        var visits: [URL: (count: Int, lastVisitedAt: Date)] = [:]
+        var candidates: [AddressSuggestion] = []
+        for entry in history where matchesAddressQuery(query, title: entry.title, address: entry.address) {
+            if let visit = visits[entry.address] {
+                visits[entry.address] = (visit.count + 1, max(visit.lastVisitedAt, entry.visitedAt))
+            } else {
+                visits[entry.address] = (1, entry.visitedAt)
+                candidates.append(AddressSuggestion(title: entry.title, address: entry.address, source: .history))
+            }
+        }
+        candidates += tabs
+            .filter { matchesAddressQuery(query, title: $0.title, address: $0.address) }
+            .map { AddressSuggestion(title: $0.title, address: $0.address, source: .tab) }
+        candidates += bookmarks
+            .filter { matchesAddressQuery(query, title: $0.title, address: $0.address) }
+            .map { AddressSuggestion(title: $0.title, address: $0.address, source: .bookmark) }
+
+        let ranked = candidates.sorted { lhs, rhs in
+            addressSuggestionScore(lhs, query: query, visits: visits[lhs.address], now: now)
+                > addressSuggestionScore(rhs, query: query, visits: visits[rhs.address], now: now)
+        }
+        // The source bonus is part of the score, so the first copy of a URL to survive is the
+        // one from the strongest source. `sorted` is not stable; the score is.
+        var seen = Set<URL>()
+        return ranked.filter { seen.insert($0.address).inserted }.prefix(limit).map { $0 }
+    }
+
+    /// The most likely continuation of what is being typed, as the full completed text. Read
+    /// off the already ranked list rather than scanning every candidate a second time.
+    static func inlineCompletion(for input: String, in suggestions: [SmartAddressSuggestion]) -> String? {
+        let typed = input.lowercased()
+        // A scheme or a space means the user is pasting a URL or writing a search phrase;
+        // neither is a host they expect the address bar to finish for them.
+        guard typed.count >= 2, !typed.contains("://"), !typed.contains(" ") else { return nil }
+
+        for case let .saved(suggestion) in suggestions {
+            let host = strippedAddressHost(suggestion.address)
+            guard !host.isEmpty else { continue }
+            for key in [host, addressCompletionKey(suggestion.address)]
+            where key.count > typed.count && key.hasPrefix(typed) {
+                return key
+            }
+        }
+        return nil
+    }
+
+    /// Arrow-key movement through a suggestion list. Stepping past either end clears the
+    /// highlight so the field falls back to whatever the user actually typed.
+    static func highlightedSuggestionIndex(from current: Int?, step: Int, count: Int) -> Int? {
+        guard count > 0 else { return nil }
+        guard let current else { return step > 0 ? 0 : count - 1 }
+        let next = current + step
+        return (0..<count).contains(next) ? next : nil
+    }
+
+    private static func matchesAddressQuery(_ query: String, title: String, address: URL) -> Bool {
+        // jungle://new-tab lives in every fresh tab; completing to it would be nonsense.
+        guard BrowserAddress.isWebURL(address) else { return false }
+        return title.lowercased().contains(query) || address.absoluteString.lowercased().contains(query)
+    }
+
+    private static func addressSuggestionScore(
+        _ suggestion: AddressSuggestion,
+        query: String,
+        visits: (count: Int, lastVisitedAt: Date)?,
+        now: Date
+    ) -> Int {
+        let host = strippedAddressHost(suggestion.address)
+        let title = suggestion.title.lowercased()
+        // A query that starts a host is a far stronger signal than the same letters buried
+        // inside a path or a query string.
+        var score =
+            if host.hasPrefix(query) { 600 }
+            else if title.hasPrefix(query) { 400 }
+            else if host.contains(query) { 200 }
+            else { 0 }
+        if let visits {
+            // Frecency: repeat visits keep counting, but a page opened today outranks a page
+            // opened twenty times last year.
+            score += min(visits.count, 20) * 10
+            let days = now.timeIntervalSince(visits.lastVisitedAt) / 86_400
+            let recency =
+                if days < 1 { 120 }
+                else if days < 7 { 70 }
+                else if days < 30 { 30 }
+                else { 0 }
+            score += recency
+        }
+        let sourceBonus =
+            switch suggestion.source {
+            case .tab: 30
+            case .bookmark: 20
+            case .history: 0
+            }
+        return score + sourceBonus
+    }
+
+    private static func strippedAddressHost(_ url: URL) -> String {
+        let host = url.host?.lowercased() ?? ""
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    /// What the address bar shows once the scheme and `www.` are dropped, which is also what
+    /// a user types from memory.
+    private static func addressCompletionKey(_ url: URL) -> String {
+        var key = url.absoluteString.lowercased()
+        for prefix in ["https://", "http://"] where key.hasPrefix(prefix) { key.removeFirst(prefix.count) }
+        if key.hasPrefix("www.") { key.removeFirst(4) }
+        return key
     }
 }

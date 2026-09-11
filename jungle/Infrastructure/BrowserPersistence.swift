@@ -9,6 +9,7 @@ final class PersistedBrowserSettings {
     var customNewTabAddress: String?
     var appearance: String
     var tabSleepInterval: TimeInterval
+    var sidebarWidth: Double?
     var activeProfileSlot: Int
     var selectedTabID: UUID?
 
@@ -18,7 +19,8 @@ final class PersistedBrowserSettings {
         newTabDestination: String? = nil,
         customNewTabAddress: String? = nil,
         appearance: String = BrowserAppearance.system.rawValue,
-        tabSleepInterval: TimeInterval = 60,
+        tabSleepInterval: TimeInterval = BrowserSettings.defaultTabSleepInterval,
+        sidebarWidth: Double? = nil,
         activeProfileSlot: Int = 0,
         selectedTabID: UUID? = nil
     ) {
@@ -28,6 +30,7 @@ final class PersistedBrowserSettings {
         self.customNewTabAddress = customNewTabAddress
         self.appearance = appearance
         self.tabSleepInterval = tabSleepInterval
+        self.sidebarWidth = sidebarWidth
         self.activeProfileSlot = activeProfileSlot
         self.selectedTabID = selectedTabID
     }
@@ -59,14 +62,16 @@ final class PersistedBookmark {
     var title: String
     var address: String
     var symbol: String
+    var customSymbol: String?
     var sortIndex: Int
 
-    init(id: UUID, folderID: UUID, title: String, address: String, symbol: String, sortIndex: Int) {
+    init(id: UUID, folderID: UUID, title: String, address: String, symbol: String, customSymbol: String?, sortIndex: Int) {
         self.id = id
         self.folderID = folderID
         self.title = title
         self.address = address
         self.symbol = symbol
+        self.customSymbol = customSymbol
         self.sortIndex = sortIndex
     }
 }
@@ -213,11 +218,18 @@ final class BrowserPersistence {
         let settings = PersistedBrowserSettings(
             searchEngine: UserDefaults.standard.string(forKey: "jungle.settings.search-engine") ?? BrowserSearchEngine.google.rawValue,
             appearance: UserDefaults.standard.string(forKey: "jungle.settings.appearance") ?? BrowserAppearance.system.rawValue,
-            tabSleepInterval: max(UserDefaults.standard.double(forKey: "jungle.settings.tab-sleep-interval"), 60)
+            tabSleepInterval: migratedTabSleepInterval
         )
         context.insert(settings)
         save()
         return settings
+    }
+
+    /// `double(forKey:)` answers zero for a key that was never written, which is the only way
+    /// to tell "no preference yet" from a preference the user actually chose.
+    private var migratedTabSleepInterval: TimeInterval {
+        let stored = UserDefaults.standard.double(forKey: "jungle.settings.tab-sleep-interval")
+        return stored > 0 ? stored : BrowserSettings.defaultTabSleepInterval
     }
 
     func saveSettings(
@@ -225,7 +237,8 @@ final class BrowserPersistence {
         newTabDestination: BrowserNewTabDestination,
         customNewTabAddress: String,
         appearance: BrowserAppearance,
-        tabSleepInterval: TimeInterval
+        tabSleepInterval: TimeInterval,
+        sidebarWidth: CGFloat
     ) {
         let settings = loadSettings()
         settings.searchEngine = searchEngine.rawValue
@@ -233,6 +246,7 @@ final class BrowserPersistence {
         settings.customNewTabAddress = customNewTabAddress
         settings.appearance = appearance.rawValue
         settings.tabSleepInterval = tabSleepInterval
+        settings.sidebarWidth = Double(sidebarWidth)
         save()
     }
 
@@ -306,7 +320,7 @@ final class BrowserPersistence {
                 name: folder.name,
                 bookmarks: bookmarks.compactMap { bookmark in
                     guard bookmark.folderID == folder.id, let address = URL(string: bookmark.address) else { return nil }
-                    return BrowserBookmark(id: bookmark.id, title: bookmark.title, address: address, symbol: bookmark.symbol)
+                    return BrowserBookmark(id: bookmark.id, title: bookmark.title, address: address, symbol: bookmark.symbol, customSymbol: bookmark.customSymbol)
                 },
                 isQuickAccess: folder.isQuickAccess,
                 isExpanded: folder.isExpanded
@@ -331,7 +345,7 @@ final class BrowserPersistence {
         for (folderIndex, folder) in folders.enumerated() {
             context.insert(PersistedBookmarkFolder(id: folder.id, profileID: folder.profileID, name: folder.name, sortIndex: folderIndex, isQuickAccess: folder.isQuickAccess, isExpanded: folder.isExpanded))
             for (bookmarkIndex, bookmark) in folder.bookmarks.enumerated() {
-                context.insert(PersistedBookmark(id: bookmark.id, folderID: folder.id, title: bookmark.title, address: bookmark.address.absoluteString, symbol: bookmark.symbol, sortIndex: bookmarkIndex))
+                context.insert(PersistedBookmark(id: bookmark.id, folderID: folder.id, title: bookmark.title, address: bookmark.address.absoluteString, symbol: bookmark.symbol, customSymbol: bookmark.customSymbol, sortIndex: bookmarkIndex))
             }
         }
         save()

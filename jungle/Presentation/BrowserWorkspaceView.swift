@@ -10,6 +10,10 @@ struct BrowserWorkspaceView: View {
         store.settings.appearance.usesDarkContent(systemIsDark: colorScheme == .dark)
     }
 
+    private var sidebarStep: SidebarStep {
+        SidebarStep.nearest(to: store.settings.sidebarWidth)
+    }
+
     var body: some View {
         workspaceWithKeyboardHandling
     }
@@ -19,8 +23,10 @@ struct BrowserWorkspaceView: View {
             HStack(spacing: 0) {
                 if store.isSidebarVisible {
                     BrowserSidebar(store: store, addressInput: $addressInput)
-                        .frame(width: 268)
+                        .environment(\.sidebarStep, sidebarStep)
+                        .frame(width: sidebarStep.width)
                         .background(SidebarSurface())
+                        .overlay(alignment: .trailing) { SidebarResizeHandle(store: store) }
                         .transition(.move(edge: .leading).combined(with: .opacity))
                 }
 
@@ -60,9 +66,6 @@ struct BrowserWorkspaceView: View {
         .onChange(of: store.selectedTabID) { _, _ in
             addressInput = store.selectedTabAddressText
         }
-        .onChange(of: store.selectedTab?.address) { _, _ in
-            addressInput = store.selectedTabAddressText
-        }
     }
 
     private var workspaceWithNotifications: some View {
@@ -91,6 +94,10 @@ struct BrowserWorkspaceView: View {
     private var workspaceWithPrimaryCommands: some View {
         configuredWorkspaceLayout
         .onReceive(NotificationCenter.default.publisher(for: .jungleNewTab)) { _ in store.createTab() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleFocusTab)) { notification in
+            guard let tabID = notification.userInfo?["tabID"] as? UUID else { return }
+            store.select(tabID)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .jungleCloseTab)) { _ in store.closeSelectedTab() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleCommandPalette)) { _ in
             store.isCommandPalettePresented = true
@@ -206,10 +213,17 @@ struct BrowserWorkspaceView: View {
 private struct NativeNewTabView: View {
     @ObservedObject var store: BrowserStore
     @State private var query = ""
+    @State private var highlightedSuggestionID: String?
+    /// Backspacing must not re-complete what the user just deleted.
+    @State private var isDeletingInput = false
+    @State private var searchFieldHeight: CGFloat = 0
     @FocusState private var isSearchFieldFocused: Bool
 
     var body: some View {
         GeometryReader { proxy in
+            // One ranking pass per render: the gate, the rows and the ghost text all read it.
+            let suggestions = visibleSuggestions
+            let completion = isDeletingInput ? nil : BrowserStore.inlineCompletion(for: query, in: suggestions)
             VStack(spacing: 0) {
                 Spacer(minLength: max(44, proxy.size.height * 0.16))
 
@@ -228,41 +242,54 @@ private struct NativeNewTabView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    VStack(spacing: 8) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(.secondary)
-                            TextField("Search or enter a full URL", text: $query)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 16, weight: .medium, design: .rounded))
-                                .focused($isSearchFieldFocused)
-                                .onSubmit(openInput)
-                            Button(action: openInput) {
-                                Image(systemName: "arrow.right")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .frame(width: 34, height: 34)
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("Search or enter a full URL", text: $query)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 16, weight: .medium, design: .rounded))
+                            .focused($isSearchFieldFocused)
+                            .onSubmit(openInput)
+                            .overlay(alignment: .leading) {
+                                inlineCompletionGhost(completion, typed: query, size: 16)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.green)
-                            .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .accessibilityLabel("Open search or address")
-                        }
-                        .padding(8)
-                        .padding(.leading, 8)
-
-                        if !suggestions.isEmpty {
-                            VStack(spacing: 2) {
-                                ForEach(suggestions) { suggestion in
-                                    suggestionRow(suggestion)
-                                }
+                            .onKeyPress(.downArrow) { moveHighlight(by: 1, in: suggestions) }
+                            .onKeyPress(.upArrow) { moveHighlight(by: -1, in: suggestions) }
+                            .onKeyPress(.escape) {
+                                guard !query.isEmpty else { return .ignored }
+                                highlightedSuggestionID = nil
+                                query = ""
+                                return .handled
                             }
-                            .padding(4)
-                            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .onChange(of: query) { previous, current in
+                                isDeletingInput = current.count < previous.count
+                                highlightedSuggestionID = nil
+                            }
+                        Button(action: openInput) {
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 14, weight: .bold))
+                                .frame(width: 34, height: 34)
                         }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                        .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityLabel("Open search or address")
                     }
+                    .padding(8)
+                    .padding(.leading, 8)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.18)))
                     .shadow(color: .black.opacity(0.08), radius: 18, y: 8)
+                    // Hung under the field by its measured height: the list appears over the
+                    // page instead of growing the card and pushing everything under it down.
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { searchFieldHeight = $0 }
+                    .overlay(alignment: .topLeading) {
+                        if !suggestions.isEmpty {
+                            suggestionPanel(suggestions)
+                                .offset(y: searchFieldHeight + 8)
+                        }
+                    }
+                    .zIndex(1)
 
                     HStack(spacing: 8) {
                         Label("Searches use \(store.settings.searchEngine.title)", systemImage: "sparkle.magnifyingglass")
@@ -295,8 +322,31 @@ private struct NativeNewTabView: View {
         .accessibilityLabel("Jungle new tab page")
     }
 
+    /// At most the seven rows the store ranks, so no scroll view: inside an overlay one is
+    /// proposed the field's height and the rows under the first stop taking clicks.
+    private func suggestionPanel(_ suggestions: [SmartAddressSuggestion]) -> some View {
+        VStack(spacing: 2) {
+            ForEach(suggestions) { suggestion in
+                suggestionRow(suggestion)
+            }
+        }
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.primary.opacity(0.10)))
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
     private func openInput() {
-        let input = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suggestions = visibleSuggestions
+        if let highlighted = suggestions.first(where: { $0.id == highlightedSuggestionID }) {
+            store.navigate(to: highlighted.input)
+            return
+        }
+        // With nothing highlighted, Return accepts the ghost completion and otherwise opens
+        // exactly what was typed.
+        let completion = isDeletingInput ? nil : BrowserStore.inlineCompletion(for: query, in: suggestions)
+        let input = completion ?? query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else {
             isSearchFieldFocused = true
             return
@@ -304,14 +354,21 @@ private struct NativeNewTabView: View {
         store.navigate(to: input)
     }
 
-    private var suggestions: [SmartAddressSuggestion] {
+    private var visibleSuggestions: [SmartAddressSuggestion] {
         store.smartAddressSuggestions(for: query)
+    }
+
+    private func moveHighlight(by step: Int, in suggestions: [SmartAddressSuggestion]) -> KeyPress.Result {
+        guard !suggestions.isEmpty else { return .ignored }
+        let current = highlightedSuggestionID.flatMap { id in suggestions.firstIndex { $0.id == id } }
+        let next = BrowserStore.highlightedSuggestionIndex(from: current, step: step, count: suggestions.count)
+        highlightedSuggestionID = next.map { suggestions[$0].id }
+        return .handled
     }
 
     private func suggestionRow(_ suggestion: SmartAddressSuggestion) -> some View {
         Button {
-            query = suggestion.input
-            openInput()
+            store.navigate(to: suggestion.input)
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: suggestion.symbol)
@@ -333,6 +390,10 @@ private struct NativeNewTabView: View {
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 7)
+            .background(
+                highlightedSuggestionID == suggestion.id ? Color.accentColor.opacity(0.22) : .clear,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -352,10 +413,28 @@ private struct NativeNewTabView: View {
     }
 }
 
+/// Inline autocomplete, drawn as ghost text: the typed prefix is laid out hidden so the
+/// remainder starts exactly where the caret is.
+/// ponytail: a real selected suffix inside the field needs an NSTextField representable, which
+/// this file deliberately avoids. Return still accepts the completion, which is the behaviour
+/// users are after. Upgrade path: wrap NSTextField and set `currentEditor().selectedRange`.
+@ViewBuilder
+private func inlineCompletionGhost(_ completion: String?, typed: String, size: CGFloat) -> some View {
+    if let completion, completion.count > typed.count {
+        HStack(spacing: 0) {
+            Text(typed).hidden()
+            Text(String(completion.dropFirst(typed.count))).foregroundStyle(.tertiary)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: size, weight: .medium, design: .rounded))
+        .lineLimit(1)
+        .allowsHitTesting(false)
+    }
+}
+
 private struct SidebarSurface: View {
     var body: some View {
-        Rectangle()
-            .fill(.ultraThinMaterial)
+        SidebarGlass()
             .overlay {
                 LinearGradient(
                     colors: [Color.green.opacity(0.10), Color.indigo.opacity(0.04), .clear],
@@ -411,35 +490,39 @@ private struct LocalDevelopmentToolbar: View {
     @ObservedObject var store: BrowserStore
     let tab: BrowserTab
 
+    @State private var isStackListPresented = false
+
+    private var metrics: DeveloperMetrics? { store.selectedDeveloperMetrics }
+
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Label("Local", systemImage: "hammer.fill")
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundStyle(.green)
-                    .padding(.trailing, 2)
+                    .help("This tab is served from your machine")
 
                 Text(tab.address.host ?? "Local development")
                     .lineLimit(1)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
 
-                if let metrics = store.selectedDeveloperMetrics {
-                    metric("JS", value: heapDescription(metrics.javaScriptHeapBytes), help: "JavaScript heap for this page when WebKit exposes it")
-                    metric("Load", value: durationDescription(metrics.loadDurationMilliseconds), help: "Navigation timing reported by the page")
-                    metric("Req", value: "\(metrics.requestCount)", help: "Main navigation plus resource timing entries observed while loading")
-                    metric("Data", value: ByteCountFormatter.string(fromByteCount: metrics.transferredBytes, countStyle: .file), help: "Transferred resource bytes reported by the page")
-                    if metrics.repeatedRequestCount > 0 {
-                        Label("\(metrics.repeatedRequestCount) repeated", systemImage: "exclamationmark.triangle.fill")
+                Divider().frame(height: 18)
+
+                // Chips render before the page reports anything, so the row never reflows
+                // when the first payload lands and the buttons stay where the pointer left them.
+                HStack(spacing: 6) {
+                    technologyGroup
+                    metric("Load", value: durationDescription(metrics?.loadDurationMilliseconds), help: "Navigation timing reported by the page")
+                    metric("Req", value: metrics.map { "\($0.requestCount)" } ?? "—", help: "Main navigation plus resource timing entries observed while loading")
+                    metric("Data", value: metrics.map { ByteCountFormatter.string(fromByteCount: $0.transferredBytes, countStyle: .file) } ?? "—", help: "Transferred resource bytes reported by the page")
+
+                    if let repeated = metrics?.repeatedRequestCount, repeated > 0 {
+                        Label("\(repeated) repeated", systemImage: "exclamationmark.triangle.fill")
                             .font(.system(size: 11, weight: .semibold, design: .rounded))
                             .foregroundStyle(.orange)
                             .help("Resources requested more than once during this load")
                     }
-                } else {
-                    ProgressView().controlSize(.mini).tint(.green)
-                    Text("Reading page metrics")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
                 Divider().frame(height: 18)
@@ -474,13 +557,111 @@ private struct LocalDevelopmentToolbar: View {
     }
 
     private func metric(_ title: String, value: String, help: String) -> some View {
-        Text("\(title) \(value)")
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.06), in: Capsule())
-            .help(help)
+        HStack(spacing: 5) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            // A fixed width keeps every value the same size, from "—" to "1,023 bytes",
+            // so the chips never resize once the page reports.
+            Text(value)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .frame(width: 54, alignment: .leading)
+        }
+        .font(.system(size: 11, weight: .semibold, design: .rounded))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(Color.primary.opacity(0.06), in: Capsule())
+        .help(help)
+    }
+
+    /// The strongest detection leads; the rest wait in a popover. The slot is the same width
+    /// whether or not anything is detected, so the metrics beside it never slide.
+    private var technologyGroup: some View {
+        let technologies = metrics?.technologies ?? []
+        // A floor wide enough for the placeholder and for a typical framework name, so the
+        // metrics beside it hold still when detection arrives after the first paint.
+        return technologyContent(technologies).frame(minWidth: 120, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func technologyContent(_ technologies: [DetectedTechnology]) -> some View {
+        if let primary = technologies.first {
+            let extra = technologies.count - 1
+            if extra > 0 {
+                Button { isStackListPresented.toggle() } label: {
+                    technologyChip(primary, extra: extra)
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+                .popover(isPresented: $isStackListPresented, arrowEdge: .bottom) {
+                    technologyList(technologies)
+                }
+                .accessibilityLabel("Detected stack: \(technologies.map(\.name).joined(separator: ", "))")
+                .accessibilityHint("Shows every framework detected on this page")
+            } else {
+                technologyChip(primary, extra: 0)
+            }
+        } else {
+            metric("Stack", value: "—", help: "Frameworks detected on this page")
+        }
+    }
+
+    private func technologyChip(_ technology: DetectedTechnology, extra: Int) -> some View {
+        HStack(spacing: 5) {
+            Text(technology.name.prefix(1))
+                .font(.system(size: 9, weight: .heavy, design: .rounded))
+                .frame(width: 16, height: 16)
+                .background(Color.green.opacity(0.22), in: Circle())
+            Text(technology.name)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+            if extra > 0 {
+                // A count on its own reads as a status; the chevron is what says "this opens".
+                HStack(spacing: 2) {
+                    Text("+\(extra)")
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .black))
+                }
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.green.opacity(0.18), in: Capsule())
+            }
+        }
+        .foregroundStyle(.green)
+        .padding(.leading, 3)
+        .padding(.trailing, extra > 0 ? 4 : 8)
+        .padding(.vertical, 3)
+        .background(Color.green.opacity(0.10), in: Capsule())
+        .help(extra > 0 ? "Detected from \(technology.detail). Click for \(extra) more" : "Detected from \(technology.detail)")
+        .accessibilityLabel("\(technology.name), detected from \(technology.detail)")
+    }
+
+    private func technologyList(_ technologies: [DetectedTechnology]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Detected stack")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+            ForEach(technologies, id: \.name) { technology in
+                HStack(alignment: .top, spacing: 8) {
+                    Text(technology.name.prefix(1))
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.green)
+                        .frame(width: 18, height: 18)
+                        .background(Color.green.opacity(0.18), in: Circle())
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(technology.name)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        Text("From \(technology.detail)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 250, alignment: .leading)
     }
 
     private func toolbarButton(_ symbol: String, label: String, help: String, action: @escaping () -> Void) -> some View {
@@ -492,11 +673,6 @@ private struct LocalDevelopmentToolbar: View {
         .pointerCursor()
         .help(help)
         .accessibilityLabel(label)
-    }
-
-    private func heapDescription(_ bytes: Int64?) -> String {
-        guard let bytes else { return "—" }
-        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
     }
 
     private func durationDescription(_ milliseconds: Int?) -> String {
@@ -588,7 +764,15 @@ private struct BrowserSidebar: View {
     @State private var completedDropTarget: SidebarDropTarget?
     @State private var completionID: UUID?
     @State private var suppressActivationUntil = Date.distantPast
+    @State private var profileMenuWidth: CGFloat = 0
+    @State private var iconPickerTarget: QuickAccessIconTarget?
+    @State private var hoveredQuickAccessBookmarkID: UUID?
+    @State private var highlightedSuggestionID: String?
+    /// Backspacing must not re-complete what the user just deleted.
+    @State private var isDeletingInput = false
+    @State private var addressFieldHeight: CGFloat = 0
     @FocusState private var isAddressFocused: Bool
+    @Environment(\.sidebarStep) private var step
 
     private var selectedTabIsNativeNewTab: Bool {
         store.selectedTab?.isNativeNewTab == true
@@ -615,10 +799,11 @@ private struct BrowserSidebar: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: step.showsLabels ? 12 : 10) {
             trafficLightProfileRow
             sidebarHeader
             navigationBar
+                .zIndex(1)
             quickAccess
 
             ScrollView {
@@ -635,16 +820,16 @@ private struct BrowserSidebar: View {
                             .padding(.bottom, 8)
                     }
 
-                    let pinnedTabs = store.visibleTabs.filter(\.isPinned)
+                    let pinnedTabs = store.listedTabs.filter(\.isPinned)
                     if !pinnedTabs.isEmpty {
-                        sidebarLabel("PINNED")
+                        sidebarLabel("PINNED", symbol: "pin.fill")
                         ForEach(pinnedTabs) { tab in tabRow(tab) }
                         if draggedTabIsPinned {
                             tabAppendDropTarget(isPinned: true)
                         }
                     }
                     openTabsHeader
-                    ForEach(store.visibleTabs.filter { !$0.isPinned }) { tab in tabRow(tab) }
+                    ForEach(store.listedTabs.filter { !$0.isPinned }) { tab in tabRow(tab) }
                     if draggedItem?.kind == .tab, !draggedTabIsPinned {
                         tabAppendDropTarget(isPinned: false)
                     }
@@ -653,7 +838,7 @@ private struct BrowserSidebar: View {
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
-                .animation(.spring(duration: 0.26, bounce: 0.16), value: store.visibleTabs.map(\.id))
+                .animation(.spring(duration: 0.26, bounce: 0.16), value: store.listedTabs.map(\.id))
                 .animation(.easeOut(duration: 0.16), value: store.closingTabIDs)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
@@ -664,6 +849,14 @@ private struct BrowserSidebar: View {
                 .simultaneousGesture(TapGesture().onEnded { dismissAddressFocus() })
         }
         .coordinateSpace(name: SidebarDragSpace.name)
+        // This sidebar leaves the view tree while it is hidden, so it catches up on the way in.
+        .task { addressInput = store.selectedTabAddressText }
+        // Same-document navigations now rewrite the address as the user browses, so the field
+        // follows the page only while nobody is typing into it.
+        .onChange(of: store.selectedTab?.address) { _, _ in
+            guard !isAddressFocused else { return }
+            addressInput = store.selectedTabAddressText
+        }
         .onPreferenceChange(SidebarDropTargetPreferenceKey.self) { dropTargetFrames = $0 }
         .overlay(alignment: .topLeading) { dragPreviewOverlay }
         .alert("New folder", isPresented: $isNewFolderPresented) {
@@ -679,93 +872,204 @@ private struct BrowserSidebar: View {
         .onDisappear(perform: clearDragState)
     }
 
+    @ViewBuilder
     private var sidebarHeader: some View {
-        HStack {
-            Button(action: {
-                dismissAddressFocus()
-                store.toggleSidebar()
-            }) { Image(systemName: "sidebar.left") }
-                .buttonStyle(ChromeIconButtonStyle())
-                .accessibilityLabel("Toggle sidebar")
-            Spacer(minLength: 0)
-            chromeButton("chevron.left", label: "Back", action: store.goBack)
-            chromeButton("chevron.right", label: "Forward", action: store.goForward)
-            chromeButton(store.isSelectedTabLoading ? "xmark" : "arrow.clockwise", label: store.isSelectedTabLoading ? "Stop loading" : "Refresh") {
-                if store.isSelectedTabLoading { store.stopLoadingSelectedTab() } else { store.reloadSelectedTab() }
+        Group {
+            if step.showsLabels {
+                HStack {
+                    toggleSidebarButton
+                    Spacer(minLength: 0)
+                    backButton
+                    forwardButton
+                    reloadButton
+                }
+            } else {
+                // Four 30pt buttons never fit on one compact row, so they wrap into a 2x2 block,
+                // centred on the same axis as the search button under it.
+                VStack(spacing: 6) {
+                    HStack(spacing: 6) { toggleSidebarButton; reloadButton }
+                    HStack(spacing: 6) { backButton; forwardButton }
+                }
+                .frame(maxWidth: .infinity)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, step.showsLabels ? 12 : 10)
         .padding(.top, 8)
         .simultaneousGesture(TapGesture().onEnded { dismissAddressFocus() })
     }
 
-    private var trafficLightProfileRow: some View {
-        HStack {
-            Spacer()
-            profilePicker
+    private var toggleSidebarButton: some View {
+        Button(action: {
+            dismissAddressFocus()
+            store.toggleSidebar()
+        }) { Image(systemName: "sidebar.left") }
+            .buttonStyle(ChromeIconButtonStyle())
+            .accessibilityLabel("Toggle sidebar")
+    }
+
+    private var backButton: some View {
+        chromeButton("chevron.left", label: "Back", action: store.goBack)
+    }
+
+    private var forwardButton: some View {
+        chromeButton("chevron.right", label: "Forward", action: store.goForward)
+    }
+
+    private var reloadButton: some View {
+        chromeButton(store.isSelectedTabLoading ? "xmark" : "arrow.clockwise", label: store.isSelectedTabLoading ? "Stop loading" : "Refresh") {
+            if store.isSelectedTabLoading { store.stopLoadingSelectedTab() } else { store.reloadSelectedTab() }
         }
-        .padding(.top, 8)
+    }
+
+    private var trafficLightProfileRow: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            profilePicker
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { profileMenuWidth = $0 }
+        }
+        // The traffic lights own the top-left corner. Wide enough, the picker simply clears them
+        // on the right; compact has to drop below them instead.
+        .padding(.top, step == .compact ? 30 : 8)
         .frame(maxWidth: .infinity)
+        // The empty header beside the traffic lights is the only surface that drags the window.
+        // A background never changes layout, and stopping short of the profile menu keeps that
+        // control's clicks a matter of geometry rather than of hit testing order.
+        .background(alignment: .leading) {
+            WindowHeaderDragArea()
+                .padding(.trailing, profileMenuWidth)
+                .accessibilityHidden(true)
+        }
         .simultaneousGesture(TapGesture().onEnded { dismissAddressFocus() })
     }
 
     private var navigationBar: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: addressBarSymbol)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(addressBarColor)
-                    .accessibilityLabel(addressBarAccessibilityLabel)
-                    .help(addressBarHelp)
-                TextField("Search or enter address", text: $addressInput)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .focused($isAddressFocused)
-                    .onSubmit {
-                        store.navigate(to: addressInput)
-                        dismissAddressFocus()
-                    }
-                if store.isSelectedTabLoading { ProgressView().controlSize(.mini).tint(.green) }
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 10)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.12)))
+        // One ranking pass per render: the gate, the rows and the ghost text all read it.
+        let suggestions = isAddressFocused ? store.smartAddressSuggestions(for: addressInput) : []
+        let completion = isDeletingInput ? nil : BrowserStore.inlineCompletion(for: addressInput, in: suggestions)
 
-            if isAddressFocused, !store.smartAddressSuggestions(for: addressInput).isEmpty {
-                addressSuggestions
+        return Group {
+            if step.showsLabels {
+                addressField(suggestions, completion: completion)
+            } else {
+                compactSearchButton
             }
         }
-        .padding(.horizontal, 12)
+        // Placed by the field's measured height rather than by an alignment guide: a guide set
+        // inside an `if` is not forwarded out of the conditional, which parked the list on top
+        // of the field and covered what was being typed.
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { addressFieldHeight = $0 }
+        .overlay(alignment: .topLeading) {
+            if !suggestions.isEmpty {
+                addressSuggestions(suggestions)
+                    .offset(y: addressFieldHeight + 6)
+            }
+        }
+        .padding(.horizontal, step.showsLabels ? 12 : 10)
     }
 
-    private var addressSuggestions: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(store.smartAddressSuggestions(for: addressInput)) { suggestion in
+    private func addressField(_ suggestions: [SmartAddressSuggestion], completion: String?) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: addressBarSymbol)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(addressBarColor)
+                .accessibilityLabel(addressBarAccessibilityLabel)
+                .help(addressBarHelp)
+            TextField("Search or enter address", text: $addressInput)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .focused($isAddressFocused)
+                .onSubmit { openAddressInput(suggestions, completion: completion) }
+                .overlay(alignment: .leading) {
+                    inlineCompletionGhost(completion, typed: addressInput, size: 13)
+                }
+                .onKeyPress(.downArrow) { moveHighlight(by: 1, in: suggestions) }
+                .onKeyPress(.upArrow) { moveHighlight(by: -1, in: suggestions) }
+                .onKeyPress(.escape) {
+                    highlightedSuggestionID = nil
+                    addressInput = store.selectedTabAddressText
+                    dismissAddressFocus()
+                    return .handled
+                }
+                .onChange(of: addressInput) { previous, current in
+                    isDeletingInput = current.count < previous.count
+                    highlightedSuggestionID = nil
+                }
+            if store.isSelectedTabLoading { ProgressView().controlSize(.mini).tint(.green) }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 10)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.12)))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// ponytail: compact trades the field for a widen-on-tap affordance. Focusing the field in
+    /// the same frame it is created does not stick, and chasing it is not worth a phase.
+    /// A chrome-sized button also reads as one of the buttons above it, where a full-width
+    /// empty pill read as a text field that had lost its text.
+    private var compactSearchButton: some View {
+        Button(action: growToShowAddressField) {
+            Image(systemName: "magnifyingglass")
+        }
+        .buttonStyle(ChromeIconButtonStyle())
+        .frame(maxWidth: .infinity)
+        .help("Search or enter address")
+        .accessibilityLabel("Search or enter address")
+    }
+
+    /// Return opens the highlighted row, then the ghost completion, then the raw text.
+    private func openAddressInput(_ suggestions: [SmartAddressSuggestion], completion: String?) {
+        let highlighted = suggestions.first { $0.id == highlightedSuggestionID }
+        store.navigate(to: highlighted?.input ?? completion ?? addressInput)
+        highlightedSuggestionID = nil
+        dismissAddressFocus()
+    }
+
+    private func moveHighlight(by step: Int, in suggestions: [SmartAddressSuggestion]) -> KeyPress.Result {
+        guard !suggestions.isEmpty else { return .ignored }
+        let current = highlightedSuggestionID.flatMap { id in suggestions.firstIndex { $0.id == id } }
+        let next = BrowserStore.highlightedSuggestionIndex(from: current, step: step, count: suggestions.count)
+        highlightedSuggestionID = next.map { suggestions[$0].id }
+        return .handled
+    }
+
+    /// Never more than the seven rows the store ranks, so the list is a plain stack: a scroll
+    /// view inside an overlay is proposed the field's height, which squashed the rows into it
+    /// and left everything below the first one unclickable.
+    private func addressSuggestions(_ suggestions: [SmartAddressSuggestion]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(suggestions) { suggestion in
                 Button {
                     addressInput = suggestion.input
                     isAddressFocused = false
-                    store.navigate(to: addressInput)
+                    store.navigate(to: suggestion.input)
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 9) {
                         Image(systemName: suggestion.symbol)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(addressSuggestionColor(suggestion))
+                            .frame(width: 16)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(suggestion.title).lineLimit(1).font(.system(size: 12, weight: .medium, design: .rounded))
+                            Text(suggestion.title).lineLimit(1).font(.system(size: 12.5, weight: .medium, design: .rounded))
                             Text(suggestion.detail)
                                 .lineLimit(1)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
-                        Spacer()
+                        Spacer(minLength: 4)
                         if let sourceLabel = suggestion.sourceLabel {
                             Text(sourceLabel).font(.caption2).foregroundStyle(.tertiary)
                         }
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 9)
                     .padding(.vertical, 7)
-                    .contentShape(Rectangle())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        highlightedSuggestionID == suggestion.id ? Color.accentColor.opacity(0.22) : .clear,
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .pointerCursor()
@@ -773,11 +1077,13 @@ private struct BrowserSidebar: View {
                 .accessibilityLabel(suggestion.accessibilityLabel)
             }
         }
-        .padding(4)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.16)))
-        .shadow(radius: 8, y: 4)
-        .padding(.top, 4)
+        .padding(5)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.primary.opacity(0.10)))
+        .shadow(color: .black.opacity(0.20), radius: 14, y: 6)
+        // The overlay is proposed the field's own height. Without this the panel is laid out
+        // inside it and only the first row answers a click.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func addressSuggestionColor(_ suggestion: SmartAddressSuggestion) -> Color {
@@ -793,26 +1099,22 @@ private struct BrowserSidebar: View {
 
     private var quickAccess: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                sidebarLabel("QUICK ACCESS")
-                Spacer()
-                Menu {
-                    if let folder = store.visibleBookmarkFolders.first(where: \.isQuickAccess) {
-                        Button("Save current page") { store.saveCurrentPage(to: folder.id) }
-                        if !folder.bookmarks.isEmpty { Divider() }
-                        ForEach(folder.bookmarks) { bookmark in
-                            Button("Remove \(bookmark.title)", role: .destructive) {
-                                store.deleteBookmark(bookmark.id, from: folder.id)
-                            }
-                        }
+            // A header over icon-width tiles is a row of label for no information, so compact
+            // drops it. The same actions stay on the grid's context menu at every width.
+            if step.showsLabels {
+                HStack {
+                    sidebarLabel("QUICK ACCESS", symbol: "star.fill")
+                    Spacer()
+                    Menu {
+                        quickAccessActions
+                    } label: {
+                        Image(systemName: "ellipsis").font(.caption.weight(.bold)).foregroundStyle(.secondary)
                     }
-                } label: {
-                    Image(systemName: "ellipsis").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .accessibilityLabel("Quick Access options")
+                    .pointerCursor()
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .accessibilityLabel("Quick Access options")
-                .pointerCursor()
             }
             LazyVGrid(columns: quickAccessGridColumns, spacing: 7) {
                 if let folder = quickAccessFolder {
@@ -825,7 +1127,8 @@ private struct BrowserSidebar: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, step.showsLabels ? 12 : 10)
+        .contextMenu { quickAccessActions }
         .background {
             if let folder = quickAccessFolder, isQuickAccessTargeted(folder.id) {
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
@@ -838,6 +1141,19 @@ private struct BrowserSidebar: View {
         .animation(.easeOut(duration: 0.14), value: activeDropTarget)
     }
 
+    @ViewBuilder
+    private var quickAccessActions: some View {
+        if let folder = quickAccessFolder {
+            Button("Save current page") { store.saveCurrentPage(to: folder.id) }
+            if !folder.bookmarks.isEmpty { Divider() }
+            ForEach(folder.bookmarks) { bookmark in
+                Button("Remove \(bookmark.title)", role: .destructive) {
+                    store.deleteBookmark(bookmark.id, from: folder.id)
+                }
+            }
+        }
+    }
+
     private var quickAccessBookmarks: [BrowserBookmark] {
         quickAccessFolder?.bookmarks ?? []
     }
@@ -847,16 +1163,8 @@ private struct BrowserSidebar: View {
     }
 
     private var quickAccessGridColumns: [GridItem] {
-        let count = quickAccessBookmarks.count
-        let columnCount: Int
-        switch count {
-        case 0:
-            columnCount = 1
-        case 1...3:
-            columnCount = count
-        default:
-            columnCount = 3
-        }
+        let count = max(quickAccessBookmarks.count, 1)
+        let columnCount = min(count, step.quickAccessColumns)
         return Array(repeating: GridItem(.flexible(), spacing: 7), count: columnCount)
     }
 
@@ -864,8 +1172,11 @@ private struct BrowserSidebar: View {
         VStack(alignment: .leading, spacing: 3) {
             Button { store.toggleFolder(folder.id) } label: {
                 HStack(spacing: 6) {
+                    if !step.showsLabels { Spacer(minLength: 0) }
                     Image(systemName: folder.isExpanded ? "folder.fill" : "folder")
-                    Text(folder.name).font(.system(size: 12, weight: .semibold, design: .rounded))
+                    if step.showsLabels {
+                        Text(folder.name).font(.system(size: 12, weight: .semibold, design: .rounded))
+                    }
                     Spacer()
                 }
                 .foregroundStyle(.secondary)
@@ -874,6 +1185,8 @@ private struct BrowserSidebar: View {
             }
             .buttonStyle(.plain)
             .pointerCursor()
+            .help(folder.name)
+            .accessibilityLabel(folder.name)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
@@ -898,10 +1211,13 @@ private struct BrowserSidebar: View {
         HStack {
             Button { store.isSettingsPresented = true } label: {
                 Label("Settings", systemImage: "gearshape")
+                    .labelStyle(SidebarLabelStyle(showsTitle: step.showsLabels))
                     .font(.system(size: 12, weight: .medium, design: .rounded))
             }
             .buttonStyle(.plain)
             .pointerCursor()
+            .help("Settings")
+            .accessibilityLabel("Settings")
             Spacer()
             Button { isNewFolderPresented = true } label: {
                 Image(systemName: "folder.badge.plus").font(.subheadline.weight(.medium))
@@ -928,36 +1244,53 @@ private struct BrowserSidebar: View {
                     .foregroundStyle(Color(nsColor: store.activeProfile.tint.color))
                     .frame(width: 25, height: 25)
                     .background(Color(nsColor: store.activeProfile.tint.color).opacity(0.12), in: Circle())
-                Text(store.activeProfile.name)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                Spacer()
-                Text("⌃\(store.profiles.firstIndex(of: store.activeProfile).map { $0 + 1 } ?? 1)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                Image(systemName: "chevron.up.chevron.down").font(.caption2.weight(.bold)).foregroundStyle(.tertiary)
+                if step.showsProfileName {
+                    Text(store.activeProfile.name)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Spacer()
+                    Text("⌃\(store.profiles.firstIndex(of: store.activeProfile).map { $0 + 1 } ?? 1)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                // The chevron is the widest thing in a 96pt sidebar that says the least.
+                if step.showsLabels {
+                    Image(systemName: "chevron.up.chevron.down").font(.caption2.weight(.bold)).foregroundStyle(.tertiary)
+                }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, step.showsLabels ? 10 : 6)
+            .padding(.vertical, step.showsLabels ? 8 : 4)
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.primary.opacity(0.06)))
         }
         .menuStyle(.borderlessButton)
-        .padding(.trailing, 12)
+        .padding(.trailing, step.showsLabels ? 12 : 10)
         .pointerCursor()
+        .help(store.activeProfile.name)
+        .accessibilityLabel("Profile: \(store.activeProfile.name)")
     }
 
-    private func sidebarLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.top, 7)
+    @ViewBuilder
+    private func sidebarLabel(_ title: String, symbol: String) -> some View {
+        Group {
+            if step.showsLabels {
+                Text(title).font(.caption2.weight(.semibold))
+            } else {
+                Image(systemName: symbol).font(.caption2.weight(.bold))
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.top, 7)
+        .help(title.capitalized)
+        .accessibilityLabel(title.capitalized)
     }
 
     private var openTabsHeader: some View {
-        HStack {
-            sidebarLabel("OPEN TABS")
-            Spacer()
+        HStack(spacing: 0) {
+            if step.showsLabels {
+                sidebarLabel("OPEN TABS", symbol: "square.on.square")
+            }
+            Spacer(minLength: 0)
             Button(action: store.createTab) {
                 Image(systemName: "plus")
                     .font(.caption.weight(.bold))
@@ -967,14 +1300,16 @@ private struct BrowserSidebar: View {
             .pointerCursor()
             .help("New tab")
             .accessibilityLabel("New tab")
-            .padding(.trailing, 8)
+            .padding(.trailing, step.showsLabels ? 8 : 0)
+            if !step.showsLabels { Spacer(minLength: 0) }
         }
+        .padding(.top, step.showsLabels ? 0 : 6)
     }
 
     private func tabRow(_ tab: BrowserTab) -> some View {
         SidebarTabRow(
             store: store,
-            tab: tab,
+            tabID: tab.id,
             isDropTargeted: isTabTargeted(tab.id),
             isDragging: draggedItem == .tab(tab.id),
             suppressActivation: shouldSuppressActivation,
@@ -1000,39 +1335,116 @@ private struct BrowserSidebar: View {
     }
 
     private func quickAccessTile(_ bookmark: BrowserBookmark, folderID: UUID) -> some View {
-        Button { if !shouldSuppressActivation { store.openBookmark(bookmark) } } label: {
-            TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
-                .frame(width: 20, height: 20)
-                .frame(maxWidth: .infinity, minHeight: 48)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 11).stroke(isBookmarkTargeted(bookmark.id) ? Color.green.opacity(0.7) : .white.opacity(0.10), lineWidth: isBookmarkTargeted(bookmark.id) ? 2 : 1))
+        let isOpen = store.quickAccessTabID(for: bookmark.id) != nil
+        let isActive = store.isQuickAccessBookmarkActive(bookmark.id)
+        let showsClose = isOpen && hoveredQuickAccessBookmarkID == bookmark.id
+        // The close control is a sibling of the tile's button, not a button inside its label:
+        // a nested button never receives the click.
+        return ZStack(alignment: .topTrailing) {
+            Button { if !shouldSuppressActivation { store.openQuickAccessBookmark(bookmark) } } label: {
+                TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol, customSymbol: bookmark.customSymbol)
+                    .frame(width: 20, height: 20)
+                    .frame(maxWidth: .infinity, minHeight: step.showsLabels ? 48 : 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(bookmark.title)
+            .accessibilityLabel(bookmark.title)
+            .accessibilityValue(isActive ? "Open" : "")
+
+            Button { store.closeQuickAccessBookmark(bookmark.id) } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 15, height: 15)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(Circle().stroke(.primary.opacity(0.10)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .opacity(showsClose ? 1 : 0)
+            .allowsHitTesting(showsClose)
+            .offset(x: 4, y: -4)
+            .accessibilityLabel("Close \(bookmark.title)")
         }
-        .buttonStyle(.plain)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 11))
+        .background(Color.green.opacity(isActive ? 0.11 : 0), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(quickAccessTileStroke(bookmark.id, isActive: isActive), lineWidth: quickAccessTileStrokeWidth(bookmark.id, isActive: isActive))
+                .allowsHitTesting(false)
+        }
         .pointerCursor()
         .interactiveHover(cornerRadius: 11)
+        .onHover { isHovering in
+            if isHovering {
+                hoveredQuickAccessBookmarkID = bookmark.id
+            } else if hoveredQuickAccessBookmarkID == bookmark.id {
+                hoveredQuickAccessBookmarkID = nil
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: showsClose)
+        .animation(.easeOut(duration: 0.14), value: isActive)
         .animation(.spring(duration: 0.18, bounce: 0.12), value: activeDropTarget)
-        .help(bookmark.title)
-        .accessibilityLabel(bookmark.title)
         .sidebarDropTarget(.bookmark(bookmarkID: bookmark.id, folderID: folderID))
         .sidebarDragGesture(payload: .bookmark(bookmark.id, folderID: folderID), source: .bookmark(bookmarkID: bookmark.id, folderID: folderID), began: beginDrag, changed: dragChanged, ended: finishDrag)
         .scaleEffect(isBookmarkTargeted(bookmark.id) ? 1.035 : (draggedItem == .bookmark(bookmark.id, folderID: folderID) ? 0.96 : 1))
         .opacity(draggedItem == .bookmark(bookmark.id, folderID: folderID) ? 0.45 : 1)
         .contextMenu {
+            Button("Choose icon…") {
+                iconPickerTarget = QuickAccessIconTarget(bookmarkID: bookmark.id, folderID: folderID)
+            }
             Button("Remove from Quick Access", role: .destructive) { store.deleteBookmark(bookmark.id, from: folderID) }
         }
+        .popover(item: iconPickerBinding(for: bookmark.id), arrowEdge: .trailing) { target in
+            QuickAccessIconPicker(selection: bookmark.customSymbol) { symbol in
+                store.setBookmarkSymbol(symbol, for: target.bookmarkID, in: target.folderID)
+                iconPickerTarget = nil
+            }
+        }
+    }
+
+    /// One shared picker state, but only the tile it belongs to presents it: binding every
+    /// tile straight to `iconPickerTarget` would pop a popover on all of them at once.
+    private func iconPickerBinding(for bookmarkID: UUID) -> Binding<QuickAccessIconTarget?> {
+        Binding(
+            get: { iconPickerTarget?.bookmarkID == bookmarkID ? iconPickerTarget : nil },
+            set: { iconPickerTarget = $0 }
+        )
+    }
+
+    /// The tile a drop is aimed at keeps the loud green it always had; an open tile gets the
+    /// quieter green the selected tab row uses, so the two states stay apart.
+    private func quickAccessTileStroke(_ bookmarkID: UUID, isActive: Bool) -> Color {
+        if isBookmarkTargeted(bookmarkID) { return Color.green.opacity(0.7) }
+        return isActive ? Color.green.opacity(0.5) : .white.opacity(0.10)
+    }
+
+    private func quickAccessTileStrokeWidth(_ bookmarkID: UUID, isActive: Bool) -> CGFloat {
+        if isBookmarkTargeted(bookmarkID) { return 2 }
+        return isActive ? 1.5 : 1
     }
 
     private func folderBookmarkRow(_ bookmark: BrowserBookmark, folderID: UUID) -> some View {
         Button { if !shouldSuppressActivation { store.openBookmark(bookmark) } } label: {
             HStack(spacing: 8) {
-                TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol)
+                if !step.showsLabels { Spacer(minLength: 0) }
+                TabFavicon(address: bookmark.address, isSuspended: false, isPinned: false, fallbackSymbol: bookmark.symbol, customSymbol: bookmark.customSymbol)
                     .frame(width: 14, height: 14)
-                Text(bookmark.title)
-                    .lineLimit(1)
-                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                if step.showsLabels {
+                    Text(bookmark.title)
+                        .lineLimit(1)
+                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                } else {
+                    Spacer(minLength: 0)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 22)
+            .help(bookmark.title)
+            .accessibilityLabel(bookmark.title)
+            // The indent that reads as "inside this folder" is wider than a compact row can spare.
+            .padding(.leading, step.showsLabels ? 22 : 10)
             .padding(.trailing, 10)
             .padding(.vertical, 7)
             .background(isBookmarkTargeted(bookmark.id) ? Color.green.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 8))
@@ -1064,6 +1476,7 @@ private struct BrowserSidebar: View {
 
     private var bookmarkRemovalDropZone: some View {
         Label("Drop saved page here to remove", systemImage: "trash")
+            .labelStyle(SidebarLabelStyle(showsTitle: step.showsLabels))
             .font(.caption.weight(.semibold))
             .foregroundStyle(isRemovalTargeted ? Color.red : Color.secondary)
             .frame(maxWidth: .infinity, minHeight: 34)
@@ -1072,6 +1485,7 @@ private struct BrowserSidebar: View {
             .padding(.top, 10)
             .sidebarDropTarget(.removal)
             .help("Drag a saved page here to remove it from its folder or Quick Access")
+            .accessibilityLabel("Drop saved page here to remove")
     }
 
     private func chromeButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
@@ -1085,6 +1499,12 @@ private struct BrowserSidebar: View {
 
     private func dismissAddressFocus() {
         isAddressFocused = false
+    }
+
+    private func growToShowAddressField() {
+        withAnimation(.spring(duration: 0.26, bounce: 0.18)) {
+            store.settings.sidebarWidth = SidebarStep.regular.width
+        }
     }
 
     private var shouldSuppressActivation: Bool {
@@ -1284,7 +1704,7 @@ private struct SidebarDragPreview: View {
 
 private struct SidebarTabRow: View {
     @ObservedObject var store: BrowserStore
-    let tab: BrowserTab
+    let tabID: UUID
     let isDropTargeted: Bool
     let isDragging: Bool
     let suppressActivation: Bool
@@ -1293,28 +1713,68 @@ private struct SidebarTabRow: View {
     let finishDrag: (SidebarDropTarget, CGPoint) -> Void
     @State private var isHovering = false
     @FocusState private var isFocused: Bool
+    @Environment(\.sidebarStep) private var step
+
+    /// Read live rather than captured: a row rendering the copy it was built with keeps
+    /// showing the pin it no longer has, and keeps offering to unpin it.
+    private var tab: BrowserTab? {
+        store.tabs.first(where: { $0.id == tabID })
+    }
 
     private var isSelected: Bool {
-        tab.id == store.selectedTabID
+        tabID == store.selectedTabID
     }
 
     private var showsCloseButton: Bool {
         isSelected || isHovering || isFocused
     }
 
-    private var rowContent: some View {
-        HStack(spacing: 8) {
-            TabFavicon(address: tab.address, isSuspended: tab.isSuspended, isPinned: tab.isPinned)
-                .frame(width: 14, height: 14)
-            Text(tab.title)
-                .lineLimit(1)
-                .font(.system(size: 12.5, weight: isSelected ? .medium : .regular, design: .rounded))
-            Spacer(minLength: 0)
-        }
+    private var isMuted: Bool { store.isMuted(tabID) }
+
+    /// The speaker earns its place only while the tab makes sound, or while it is the reason
+    /// the tab is silent.
+    private var showsSpeaker: Bool {
+        store.isAudible(tabID) || isMuted
     }
 
-    private var closeButton: some View {
-        Button { store.requestClose(tab.id) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
+    private func rowContent(_ tab: BrowserTab) -> some View {
+        HStack(spacing: 8) {
+            if !step.showsLabels { Spacer(minLength: 0) }
+            TabFavicon(address: tab.address, isSuspended: tab.isSuspended, isPinned: tab.isPinned)
+                .frame(width: 14, height: 14)
+            if step.showsLabels {
+                Text(tab.title)
+                    .lineLimit(1)
+                    .font(.system(size: 12.5, weight: isSelected ? .medium : .regular, design: .rounded))
+            }
+            Spacer(minLength: 0)
+        }
+        .help(tab.title)
+        .accessibilityLabel(tab.title)
+    }
+
+    private var speakerButton: some View {
+        Button { store.toggleMuted(tabID) } label: {
+            Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .font(.system(size: 9, weight: .semibold))
+                .frame(width: 14, height: 14)
+                .foregroundStyle(isMuted ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.green))
+                .contentTransition(.symbolEffect(.replace))
+                // Without this the button only answers clicks that land on the glyph's own
+                // strokes, which at 9pt is a sliver the pointer keeps missing.
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .opacity(showsSpeaker ? 1 : 0)
+        .allowsHitTesting(showsSpeaker)
+        .frame(width: showsSpeaker ? 14 : 0)
+        .help(isMuted ? "Unmute tab" : "Mute tab")
+        .accessibilityLabel(isMuted ? "Unmute tab" : "Mute tab")
+    }
+
+    private func closeButton(_ tab: BrowserTab) -> some View {
+        Button { store.requestClose(tabID) } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
             .buttonStyle(.plain)
             .pointerCursor()
             .opacity(showsCloseButton ? 0.7 : 0)
@@ -1323,11 +1783,24 @@ private struct SidebarTabRow: View {
     }
 
     var body: some View {
+        if let tab {
+            row(tab)
+        }
+    }
+
+    private func row(_ tab: BrowserTab) -> some View {
         ZStack(alignment: .trailing) {
-            Button { if !suppressActivation { store.select(tab.id) } } label: { rowContent }
+            Button { if !suppressActivation { store.select(tabID) } } label: { rowContent(tab) }
                 .buttonStyle(.plain)
                 .contentShape(Rectangle())
-            closeButton
+            // The speaker keeps its slot whether or not the close button is showing, so it
+            // never slides sideways under the pointer as the row is hovered.
+            HStack(spacing: 6) {
+                speakerButton
+                closeButton(tab)
+            }
+            .animation(.easeOut(duration: 0.14), value: showsSpeaker)
+            .animation(.easeOut(duration: 0.12), value: isMuted)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -1344,13 +1817,13 @@ private struct SidebarTabRow: View {
                 .stroke(isDropTargeted ? Color.green.opacity(0.72) : .clear, lineWidth: 1.5)
                 .allowsHitTesting(false)
         }
-        .sidebarDropTarget(.tab(tab.id))
-        .sidebarDragGesture(payload: .tab(tab.id), source: .tab(tab.id), began: beginDrag, changed: dragChanged, ended: finishDrag)
-        .opacity(store.isClosingTab(tab.id) ? 0 : (isDragging ? 0.42 : 1))
-        .scaleEffect(store.isClosingTab(tab.id) ? 0.82 : (isDragging ? 0.98 : 1), anchor: .trailing)
-        .blur(radius: store.isClosingTab(tab.id) ? 3 : 0)
-        .offset(x: store.isClosingTab(tab.id) ? 14 : 0)
-        .animation(.easeIn(duration: 0.16), value: store.isClosingTab(tab.id))
+        .sidebarDropTarget(.tab(tabID))
+        .sidebarDragGesture(payload: .tab(tabID), source: .tab(tabID), began: beginDrag, changed: dragChanged, ended: finishDrag)
+        .opacity(store.isClosingTab(tabID) ? 0 : (isDragging ? 0.42 : 1))
+        .scaleEffect(store.isClosingTab(tabID) ? 0.82 : (isDragging ? 0.98 : 1), anchor: .trailing)
+        .blur(radius: store.isClosingTab(tabID) ? 3 : 0)
+        .offset(x: store.isClosingTab(tabID) ? 14 : 0)
+        .animation(.easeIn(duration: 0.16), value: store.isClosingTab(tabID))
         .animation(.spring(duration: 0.18, bounce: 0.12), value: isDropTargeted)
         .animation(.easeOut(duration: 0.12), value: isDragging)
         .transition(.asymmetric(
@@ -1362,8 +1835,9 @@ private struct SidebarTabRow: View {
         .focused($isFocused)
         .onHover { isHovering = $0 }
         .contextMenu {
-            Button(tab.isPinned ? "Unpin tab" : "Pin tab") { store.togglePinned(tab.id) }
-            TabBookmarkFolderMenu(store: store, tabID: tab.id)
+            Button(tab.isPinned ? "Unpin tab" : "Pin tab") { store.togglePinned(tabID) }
+            Button(isMuted ? "Unmute tab" : "Mute tab") { store.toggleMuted(tabID) }
+            TabBookmarkFolderMenu(store: store, tabID: tabID)
         }
     }
 }
@@ -1381,21 +1855,87 @@ private struct TabBookmarkFolderMenu: View {
     }
 }
 
+struct QuickAccessIconTarget: Identifiable {
+    let bookmarkID: UUID
+    let folderID: UUID
+
+    var id: UUID { bookmarkID }
+}
+
+/// ponytail: a fixed shortlist of SF Symbols rather than a searchable catalogue browser.
+/// Swap it for a search field the day the shortlist runs out.
+private struct QuickAccessIconPicker: View {
+    let selection: String?
+    let choose: (String?) -> Void
+
+    private static let symbols = [
+        "globe", "magnifyingglass", "star.fill", "heart.fill", "bolt.fill", "flame.fill",
+        "leaf.fill", "bookmark.fill", "folder.fill", "tray.full.fill", "envelope.fill", "bell.fill",
+        "calendar", "clock.fill", "checklist", "chart.bar.fill", "creditcard.fill", "cart.fill",
+        "briefcase.fill", "building.2.fill", "house.fill", "person.crop.circle", "person.2.fill", "bubble.left.fill",
+        "chevron.left.forwardslash.chevron.right", "terminal.fill", "hammer.fill", "wrench.and.screwdriver.fill", "cube.fill", "server.rack",
+        "apple.logo", "play.rectangle.fill", "music.note", "camera.fill", "photo.fill", "book.fill",
+        "map.fill", "airplane", "gamecontroller.fill", "paintbrush.fill", "sparkles", "lock.fill"
+    ]
+
+    private let columns = Array(repeating: GridItem(.fixed(30), spacing: 6), count: 6)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("QUICK ACCESS ICON")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            LazyVGrid(columns: columns, spacing: 6) {
+                ForEach(Self.symbols, id: \.self) { symbol in
+                    Button { choose(symbol) } label: {
+                        Image(systemName: symbol)
+                            .font(.system(size: 13))
+                            .foregroundStyle(selection == symbol ? AnyShapeStyle(Color.green) : AnyShapeStyle(.primary))
+                            .frame(width: 30, height: 30)
+                            .background(
+                                selection == symbol ? Color.green.opacity(0.18) : Color.primary.opacity(0.05),
+                                in: RoundedRectangle(cornerRadius: 7)
+                            )
+                            .contentShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .accessibilityLabel(symbol)
+                }
+            }
+            Divider()
+            Button("Use the site icon") { choose(nil) }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(selection == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.accentColor))
+                .disabled(selection == nil)
+                .pointerCursor()
+        }
+        .padding(12)
+        .frame(width: 228)
+    }
+}
+
 private struct TabFavicon: View {
     let address: URL
     let isSuspended: Bool
     let isPinned: Bool
     let fallbackSymbol: String
+    /// A symbol the user chose. It replaces the favicon rather than standing in for it.
+    let customSymbol: String?
 
-    init(address: URL, isSuspended: Bool, isPinned: Bool, fallbackSymbol: String = "globe") {
+    init(address: URL, isSuspended: Bool, isPinned: Bool, fallbackSymbol: String = "globe", customSymbol: String? = nil) {
         self.address = address
         self.isSuspended = isSuspended
         self.isPinned = isPinned
         self.fallbackSymbol = fallbackSymbol
+        self.customSymbol = customSymbol
     }
 
     var body: some View {
-        if BrowserAddress.isNativeNewTab(address) {
+        if let customSymbol {
+            Image(systemName: customSymbol).foregroundStyle(.secondary)
+        } else if BrowserAddress.isNativeNewTab(address) {
             Image(systemName: "leaf.fill").foregroundStyle(.green)
         } else if isSuspended {
             Image(systemName: "moon.zzz.fill").foregroundStyle(.secondary)
@@ -1435,9 +1975,9 @@ struct ChromeIconButtonStyle: ButtonStyle {
 
 struct PointerCursorModifier: ViewModifier {
     func body(content: Content) -> some View {
-        content.onHover { isHovering in
-            (isHovering ? NSCursor.pointingHand : NSCursor.arrow).set()
-        }
+        // A cursor rect survives the mouse-moved events that undo `NSCursor.set()`, and it
+        // stops a control's hover exit from stomping a neighbour's cursor.
+        content.pointerStyle(.link)
     }
 }
 
