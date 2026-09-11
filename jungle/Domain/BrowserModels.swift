@@ -245,3 +245,54 @@ struct DeveloperMetrics: Equatable {
         technologies: []
     )
 }
+
+/// What a tab puts on screen after a load fails. WebKit paints nothing at all when it cannot
+/// reach a site, so without this the tab is a blank rectangle with no way back.
+struct NavigationFailure: Equatable {
+    let address: URL
+    let symbol: String
+    let title: String
+    let message: String
+
+    /// `nil` for the errors that are not failures: a load something cancelled, and the two
+    /// policy changes WebKit reports when a response turns into a download or is ignored.
+    init?(error: Error, address: URL) {
+        let error = error as NSError
+        let isCancellation = (error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled)
+            || (error.domain == "WebKitErrorDomain" && (error.code == 102 || error.code == 204))
+        guard !isCancellation else { return nil }
+
+        self.address = address
+        let host = address.host ?? address.absoluteString
+        // Codes are only meaningful inside their own domain; 0 is no URL error, so anything
+        // WebKit or a plugin raises lands on the general case with its own description.
+        switch error.domain == NSURLErrorDomain ? error.code : 0 {
+        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+            symbol = "questionmark.circle"
+            title = "Site not found"
+            message = "Jungle can't find a server at \(host). Check the address for a typo."
+        case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+            symbol = "wifi.slash"
+            title = "You're offline"
+            message = "This Mac lost its internet connection, so \(host) is out of reach."
+        case NSURLErrorCannotConnectToHost:
+            symbol = "bolt.horizontal.circle"
+            title = "Can't connect"
+            message = "\(host) refused the connection. The server may be down or the port closed."
+        case NSURLErrorTimedOut:
+            symbol = "clock.badge.exclamationmark"
+            title = "The server took too long"
+            message = "\(host) didn't answer in time."
+        case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted,
+             NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateNotYetValid,
+             NSURLErrorServerCertificateHasUnknownRoot:
+            symbol = "lock.trianglebadge.exclamationmark"
+            title = "The connection isn't private"
+            message = "Jungle couldn't verify the certificate \(host) presented."
+        default:
+            symbol = "exclamationmark.triangle"
+            title = "This page didn't load"
+            message = error.localizedDescription
+        }
+    }
+}

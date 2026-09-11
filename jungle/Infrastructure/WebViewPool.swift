@@ -55,7 +55,7 @@ final class WebViewPool {
 
         let webView = JungleWebView(frame: .zero, configuration: configuration)
         applyContentBackground(isDark: isDark ?? systemAppearanceIsDark, to: webView)
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
+        webView.customUserAgent = Self.safariUserAgent
         webView.allowsBackForwardNavigationGestures = true
         webView.isInspectable = true
         webViews[tab.id] = webView
@@ -81,6 +81,22 @@ final class WebViewPool {
         hostViews[tab.id] = hostView
         return hostView
     }
+
+    /// A Safari user agent carrying this system's version. Google Sheets halves the resolution
+    /// of its grid canvas for a Safari it reads as old: a frozen `Version/18.6` had the grid
+    /// drawing 620 by 404 pixels into a 1240 by 808 box, which is what looked blurry. The
+    /// version this builds renders the same grid at the full 2478 by 1614.
+    ///
+    /// ponytail: the version is read from the system rather than written down, because a
+    /// number written down is the number that went stale and caused this. It tracks the OS
+    /// major and minor, which Safari has shipped alongside since macOS 26 — the oldest system
+    /// the app runs on. Safari itself also sends its patch component, and Sheets does not
+    /// care: the two-part version was measured rendering at full resolution.
+    static let safariUserAgent: String = {
+        let system = ProcessInfo.processInfo.operatingSystemVersion
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            + "Version/\(system.majorVersion).\(system.minorVersion) Safari/605.1.15"
+    }()
 
     /// Writes a private WebKit preference, and does nothing if this WebKit has dropped it:
     /// an unknown key would otherwise raise an Objective-C exception Swift cannot catch.

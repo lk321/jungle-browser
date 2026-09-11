@@ -9,6 +9,24 @@ final class JungleTests: XCTestCase {
         BrowserStore(persistence: try! BrowserPersistence(testingInMemory: true))
     }
 
+    /// Google Sheets halves its grid canvas for a Safari it reads as old, so the version in
+    /// the user agent is what keeps a spreadsheet sharp. The agent has to stay a Safari agent,
+    /// and the version it carries has to be one no older than the `18.6` that caused the blur.
+    @MainActor
+    func testSafariUserAgentCarriesAVersionNewerThanTheOneSheetsDegrades() {
+        let agent = WebViewPool.safariUserAgent
+
+        XCTAssertTrue(agent.hasPrefix("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "), agent)
+        XCTAssertTrue(agent.hasSuffix(" Safari/605.1.15"), agent)
+
+        guard let version = agent.components(separatedBy: "Version/").last?.components(separatedBy: " ").first,
+              let major = Int(version.components(separatedBy: ".").first ?? "")
+        else { return XCTFail("no version in \(agent)") }
+        // Deriving the version from the OS only holds while Safari ships the OS version, which
+        // started at macOS 26. An older system would silently hand Sheets a stale Safari again.
+        XCTAssertGreaterThanOrEqual(major, 26, agent)
+    }
+
     /// A capture prompt covers one device or both, so a pair of stored answers has to settle
     /// the combined request: any block denies, all allows grant, anything else still asks.
     @MainActor
@@ -66,6 +84,96 @@ final class JungleTests: XCTestCase {
         let candidates = BrowserStore.idleTabs(in: [idle, selected, pinned, recent], cutoff: cutoff, selectedTabID: selected.id)
 
         XCTAssertEqual(candidates.map(\.id), [idle.id])
+    }
+
+    /// The zoom ladder: both ends clamp, and stepping out and back in lands on exactly 1.0
+    /// rather than on a drifted neighbour that would leave the badge reading 99%.
+    @MainActor
+    func testPageZoomStepsClampAndRoundTrip() {
+        XCTAssertEqual(BrowserStore.pageZoomStep(above: 1), 1.1)
+        XCTAssertEqual(BrowserStore.pageZoomStep(below: 1), 0.9)
+        XCTAssertEqual(BrowserStore.pageZoomStep(above: 3), 3)
+        XCTAssertEqual(BrowserStore.pageZoomStep(below: 0.5), 0.5)
+        XCTAssertEqual(BrowserStore.pageZoomStep(below: BrowserStore.pageZoomStep(above: 1)), 1)
+        XCTAssertEqual(BrowserStore.pageZoomStep(above: BrowserStore.pageZoomStep(below: 1)), 1)
+    }
+
+    /// A failed load leaves the web view blank, so the tab renders the failure instead. A
+    /// cancelled load is not a failure: it is what every interrupted navigation reports.
+    func testNavigationFailureDescribesTheErrorAndIgnoresCancellations() {
+        let address = URL(string: "https://nope.example")!
+        let notFound = NavigationFailure(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotFindHost),
+            address: address
+        )
+
+        XCTAssertEqual(notFound?.title, "Site not found")
+        XCTAssertTrue(notFound?.message.contains("nope.example") ?? false)
+        XCTAssertNil(NavigationFailure(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled), address: address))
+        XCTAssertNil(NavigationFailure(error: NSError(domain: "WebKitErrorDomain", code: 102), address: address))
+        // Anything outside the URL domain still gets a page, carrying the system's own wording.
+        XCTAssertEqual(
+            NavigationFailure(error: NSError(domain: "SomeOtherDomain", code: -1004), address: address)?.title,
+            "This page didn't load"
+        )
+    }
+
+    /// ⌘1…⌘9 address the Quick Access tiles in the order the sidebar shows them, and a number
+    /// past the last tile has to do nothing rather than open something else.
+    @MainActor
+    func testQuickAccessNumberOpensTheTileInThatPosition() {
+        let store = makeStore()
+        let tiles = store.quickAccessBookmarks
+        guard tiles.count >= 2 else { return XCTFail("expected the default Quick Access tiles") }
+        let tabCountBefore = store.tabs.count
+
+        store.openQuickAccessBookmark(number: 2)
+
+        XCTAssertEqual(store.quickAccessTabID(for: tiles[1].id), store.selectedTabID)
+        XCTAssertEqual(store.selectedTab?.address, tiles[1].address)
+
+        // The same number again returns to the tile it already owns instead of opening a copy.
+        let openedTabID = store.selectedTabID
+        store.openQuickAccessBookmark(number: 2)
+        XCTAssertEqual(store.selectedTabID, openedTabID)
+        XCTAssertEqual(store.tabs.count, tabCountBefore + 1)
+
+        store.openQuickAccessBookmark(number: tiles.count + 1)
+        store.openQuickAccessBookmark(number: 0)
+        XCTAssertEqual(store.selectedTabID, openedTabID)
+        XCTAssertEqual(store.tabs.count, tabCountBefore + 1)
+    }
+
+    /// A `target="_blank"` link that is itself a download must not open a tab: WebKit
+    /// downloads it from the page that asked, and a tab beside it fetched the same file again
+    /// and then sat blank forever.
+    @MainActor
+    func testNewWindowDestinationSkipsDownloadsAndNonWebAddresses() {
+        let address = URL(string: "https://example.com/image.png")!
+
+        XCTAssertEqual(BrowserStore.newWindowDestination(shouldPerformDownload: false, requestURL: address), address)
+        XCTAssertNil(BrowserStore.newWindowDestination(shouldPerformDownload: true, requestURL: address))
+        XCTAssertNil(BrowserStore.newWindowDestination(shouldPerformDownload: false, requestURL: nil))
+        XCTAssertNil(BrowserStore.newWindowDestination(
+            shouldPerformDownload: false,
+            requestURL: URL(string: "mailto:someone@example.com")
+        ))
+    }
+
+    /// A tab a link opened only to carry a download never receives a document, so it closes
+    /// itself instead of staying behind as a blank page the user has to clean up.
+    @MainActor
+    func testTabOpenedOnlyForADownloadCloses() async {
+        let store = makeStore()
+        store.createTab()
+        guard let tabID = store.selectedTabID else { return XCTFail("no tab") }
+        let tabCount = store.tabs.count
+
+        store.closeTabOpenedForDownload(tabID)
+
+        try? await Task.sleep(for: .milliseconds(250))
+        XCTAssertFalse(store.tabs.contains { $0.id == tabID })
+        XCTAssertEqual(store.tabs.count, tabCount - 1)
     }
 
     @MainActor
@@ -781,7 +889,6 @@ final class JungleTests: XCTestCase {
             BrowserStore.commandClickDestination(
                 navigationType: .linkActivated,
                 modifierFlags: .command,
-                shouldPerformDownload: false,
                 requestURL: destination
             ),
             destination
@@ -790,7 +897,6 @@ final class JungleTests: XCTestCase {
             BrowserStore.commandClickDestination(
                 navigationType: .linkActivated,
                 modifierFlags: [],
-                shouldPerformDownload: false,
                 requestURL: destination
             )
         )
@@ -798,8 +904,7 @@ final class JungleTests: XCTestCase {
             BrowserStore.commandClickDestination(
                 navigationType: .linkActivated,
                 modifierFlags: .command,
-                shouldPerformDownload: true,
-                requestURL: destination
+                requestURL: URL(string: "mailto:someone@example.com")
             )
         )
     }

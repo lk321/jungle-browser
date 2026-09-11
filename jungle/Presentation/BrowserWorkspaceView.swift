@@ -89,6 +89,10 @@ struct BrowserWorkspaceView: View {
             guard let number = notification.userInfo?["number"] as? Int else { return }
             store.switchProfile(number: number)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleOpenQuickAccess)) { notification in
+            guard let number = notification.userInfo?["number"] as? Int else { return }
+            store.openQuickAccessBookmark(number: number)
+        }
     }
 
     private var workspaceWithPrimaryCommands: some View {
@@ -120,6 +124,9 @@ struct BrowserWorkspaceView: View {
     private var workspaceWithMediaAndDeveloperCommands: some View {
         workspaceWithNotifications
         .onReceive(NotificationCenter.default.publisher(for: .jungleReloadIgnoringCache)) { _ in store.reloadSelectedTabIgnoringCache() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleZoomIn)) { _ in store.zoomIn() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleZoomOut)) { _ in store.zoomOut() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleActualSize)) { _ in store.resetPageZoom() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleTogglePictureInPicture)) { _ in store.togglePictureInPicture() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleToggleWebInspector)) { _ in store.toggleWebInspector() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleShowJavaScriptConsole)) { _ in store.showJavaScriptConsole() }
@@ -170,10 +177,22 @@ struct BrowserWorkspaceView: View {
                             .background(Color(nsColor: WebViewPool.contentBackground(isDark: usesDarkContent)))
                     }
 
+                    if let failure = store.selectedNavigationFailure, !tab.isSuspended, !tab.isNativeNewTab {
+                        NavigationFailureView(failure: failure, isRetrying: store.isSelectedTabLoading) {
+                            store.reloadSelectedTab()
+                        }
+                        .background(Color(nsColor: WebViewPool.contentBackground(isDark: usesDarkContent)))
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    }
+
                     VStack(alignment: .trailing, spacing: 8) {
                         if let copiedAddress = store.copiedTabAddress {
                             CopiedAddressFeedback(address: copiedAddress)
                                 .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                        if let zoom = store.pageZoomFeedback {
+                            PageZoomFeedback(level: zoom)
+                                .transition(.scale(scale: 0.9).combined(with: .opacity))
                         }
                         if store.isSelectedTabLoading {
                             NavigationFeedback(title: tab.address.host ?? "Loading page")
@@ -191,6 +210,8 @@ struct BrowserWorkspaceView: View {
                 }
                 .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
                 .animation(.easeOut(duration: 0.16), value: store.copiedTabAddress)
+                .animation(.spring(duration: 0.26, bounce: 0.2), value: store.pageZoomFeedback)
+                .animation(.easeOut(duration: 0.2), value: store.selectedNavigationFailure)
             }
             .animation(.spring(duration: 0.28, bounce: 0.16), value: store.selectedTabIsLocalDevelopment)
             .opacity(store.isClosingTab(tab.id) ? 0.08 : 1)
@@ -493,6 +514,26 @@ private struct CopiedAddressFeedback: View {
     }
 }
 
+private struct PageZoomFeedback: View {
+    let level: Double
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: level > 1 ? "plus.magnifyingglass" : (level < 1 ? "minus.magnifyingglass" : "1.magnifyingglass"))
+                .foregroundStyle(.secondary)
+            Text("\(Int((level * 100).rounded()))%")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.14)))
+        .shadow(radius: 10, y: 4)
+    }
+}
+
 private struct LocalDevelopmentToolbar: View {
     @ObservedObject var store: BrowserStore
     let tab: BrowserTab
@@ -516,8 +557,9 @@ private struct LocalDevelopmentToolbar: View {
 
                 Divider().frame(height: 18)
 
-                // Chips render before the page reports anything, so the row never reflows
-                // when the first payload lands and the buttons stay where the pointer left them.
+                // Every chip is as wide as what it holds, so a short stack name leaves no gap
+                // before the metrics. The row glides to its new width when a payload lands
+                // rather than jumping, which is what a reflow made unpleasant before.
                 HStack(spacing: 6) {
                     technologyGroup
                     metric("Load", value: durationDescription(metrics?.loadDurationMilliseconds), help: "Navigation timing reported by the page")
@@ -531,6 +573,7 @@ private struct LocalDevelopmentToolbar: View {
                             .help("Resources requested more than once during this load")
                     }
                 }
+                .animation(.easeInOut(duration: 0.2), value: metrics)
 
                 Divider().frame(height: 18)
 
@@ -567,13 +610,9 @@ private struct LocalDevelopmentToolbar: View {
         HStack(spacing: 5) {
             Text(title)
                 .foregroundStyle(.secondary)
-            // A fixed width keeps every value the same size, from "—" to "1,023 bytes",
-            // so the chips never resize once the page reports.
             Text(value)
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .frame(width: 54, alignment: .leading)
         }
         .font(.system(size: 11, weight: .semibold, design: .rounded))
         .padding(.horizontal, 7)
@@ -582,13 +621,10 @@ private struct LocalDevelopmentToolbar: View {
         .help(help)
     }
 
-    /// The strongest detection leads; the rest wait in a popover. The slot is the same width
-    /// whether or not anything is detected, so the metrics beside it never slide.
+    /// The strongest detection leads; the rest wait in a popover. The chip is only as wide
+    /// as the name it shows: a 120pt floor is what left a gap before the metrics.
     private var technologyGroup: some View {
-        let technologies = metrics?.technologies ?? []
-        // A floor wide enough for the placeholder and for a typical framework name, so the
-        // metrics beside it hold still when detection arrives after the first paint.
-        return technologyContent(technologies).frame(minWidth: 120, alignment: .leading)
+        technologyContent(metrics?.technologies ?? [])
     }
 
     @ViewBuilder
@@ -2014,6 +2050,67 @@ private struct InteractiveHoverModifier: ViewModifier {
     }
 }
 
+private struct NavigationFailureView: View {
+    let failure: NavigationFailure
+    let isRetrying: Bool
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: failure.symbol)
+                .font(.system(size: 40, weight: .medium))
+                .foregroundStyle(.green)
+                .padding(22)
+                .background(Color.green.opacity(0.12), in: Circle())
+                .symbolEffect(.pulse, isActive: isRetrying)
+
+            VStack(spacing: 8) {
+                Text(failure.title)
+                    .font(.system(size: 21, weight: .semibold, design: .rounded))
+                Text(failure.message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+            }
+
+            Text(failure.address.absoluteString)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.06), in: Capsule())
+                .frame(maxWidth: 420)
+
+            // ⌘R reaches the same call through the View menu, so the badge is a reminder
+            // rather than a second binding to keep in step.
+            Button(action: retry) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.clockwise")
+                    Text(isRetrying ? "Reloading" : "Try again")
+                    Text("\u{2318}R")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+            .disabled(isRetrying)
+            .keyboardShortcut(.defaultAction)
+            .pointerCursor()
+        }
+        .padding(48)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(failure.title). \(failure.message)")
+    }
+}
+
 private struct SuspendedTabView: View {
     let tab: BrowserTab
     let resume: () -> Void
@@ -2065,6 +2162,10 @@ private struct CommandPalette: View {
             .padding(.vertical, 11)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
 
+            // Quick Access can add nine more rows, so the list scrolls instead of growing the
+            // sheet past the window.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
             paletteSection("ACTIONS") {
                 command("New tab", symbol: "plus.square.on.square", shortcut: "⌘T") { store.createTab() }
                 command("Back", symbol: "chevron.left", shortcut: "⌘←") { store.goBack() }
@@ -2086,6 +2187,16 @@ private struct CommandPalette: View {
                 command("Browser settings", symbol: "gearshape", shortcut: "⌘,") { store.isSettingsPresented = true }
             }
 
+            if !store.quickAccessBookmarks.isEmpty {
+                paletteSection("QUICK ACCESS") {
+                    ForEach(Array(store.quickAccessBookmarks.prefix(9).enumerated()), id: \.element.id) { index, bookmark in
+                        command(bookmark.title, symbol: bookmark.customSymbol ?? bookmark.symbol, shortcut: "⌘\(index + 1)") {
+                            store.openQuickAccessBookmark(bookmark)
+                        }
+                    }
+                }
+            }
+
             if !store.visibleTabs.isEmpty {
                 paletteSection("OPEN TABS") {
                     ForEach(store.visibleTabs.prefix(5)) { tab in
@@ -2102,8 +2213,12 @@ private struct CommandPalette: View {
                     }
                 }
             }
+                }
+            }
+            .scrollIndicators(.automatic)
         }
         .frame(width: 520)
+        .frame(maxHeight: 560)
         .padding(14)
         .background(.regularMaterial)
     }

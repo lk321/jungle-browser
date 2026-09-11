@@ -83,12 +83,32 @@ struct JungleApp: App {
                     NotificationCenter.default.post(name: .jungleToggleSidebar, object: nil)
                 }
                 .keyboardShortcut("b", modifiers: .command)
+                ForEach(1...9, id: \.self) { number in
+                    Button("Quick Access \(number)") {
+                        NotificationCenter.default.post(name: .jungleOpenQuickAccess, object: nil, userInfo: ["number": number])
+                    }
+                    .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
+                }
                 ForEach(1...3, id: \.self) { number in
                     Button("Switch to Profile \(number)") {
                         NotificationCenter.default.post(name: .jungleSwitchProfile, object: nil, userInfo: ["number": number])
                     }
                     .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .control)
                 }
+            }
+            CommandGroup(after: .sidebar) {
+                Button("Zoom In") {
+                    NotificationCenter.default.post(name: .jungleZoomIn, object: nil)
+                }
+                .keyboardShortcut("+", modifiers: .command)
+                Button("Zoom Out") {
+                    NotificationCenter.default.post(name: .jungleZoomOut, object: nil)
+                }
+                .keyboardShortcut("-", modifiers: .command)
+                Button("Actual Size") {
+                    NotificationCenter.default.post(name: .jungleActualSize, object: nil)
+                }
+                .keyboardShortcut("0", modifiers: .command)
             }
             CommandMenu("Develop") {
                 Button("Show Web Inspector") {
@@ -120,6 +140,7 @@ extension Notification.Name {
     static let jungleSelectPreviousTab = Notification.Name("jungle.select-previous-tab")
     static let jungleToggleSidebar = Notification.Name("jungle.toggle-sidebar")
     static let jungleSwitchProfile = Notification.Name("jungle.switch-profile")
+    static let jungleOpenQuickAccess = Notification.Name("jungle.open-quick-access")
     static let jungleTrafficLightsVisibility = Notification.Name("jungle.traffic-lights-visibility")
     static let jungleOpenSettings = Notification.Name("jungle.open-settings")
     static let jungleShowHistory = Notification.Name("jungle.show-history")
@@ -128,6 +149,9 @@ extension Notification.Name {
     static let jungleGoForward = Notification.Name("jungle.go-forward")
     static let jungleCopyActiveTabURL = Notification.Name("jungle.copy-active-tab-url")
     static let jungleReload = Notification.Name("jungle.reload")
+    static let jungleZoomIn = Notification.Name("jungle.zoom-in")
+    static let jungleZoomOut = Notification.Name("jungle.zoom-out")
+    static let jungleActualSize = Notification.Name("jungle.actual-size")
     static let jungleReloadIgnoringCache = Notification.Name("jungle.reload-ignoring-cache")
     static let jungleTogglePictureInPicture = Notification.Name("jungle.toggle-picture-in-picture")
     static let junglePictureInPictureDidChange = Notification.Name("jungle.picture-in-picture-did-change")

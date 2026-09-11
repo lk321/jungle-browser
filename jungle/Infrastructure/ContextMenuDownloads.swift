@@ -1,10 +1,11 @@
 import AppKit
 import WebKit
 
-/// Starts a download WebKit's own context menu could not.
+/// Starts a download WebKit itself would not: the ones its context menu drops, and the ones
+/// a `download` link asks for.
 @MainActor
 protocol ContextMenuDownloadStarter: AnyObject {
-    func startContextMenuDownload(from address: URL, in webView: WKWebView)
+    func startDownload(from address: URL, in webView: WKWebView)
 }
 
 /// WebKit's "Download Image" and "Download Linked File" go straight to a `WKDownload` the
@@ -37,7 +38,7 @@ final class JungleWebView: WKWebView {
 
     @objc private func startContextMenuDownload(_ sender: NSMenuItem) {
         guard let identifier = sender.identifier?.rawValue, let address = contextMenuDownloads[identifier] else { return }
-        downloadStarter?.startContextMenuDownload(from: address, in: self)
+        downloadStarter?.startDownload(from: address, in: self)
     }
 
     static let contextMenuHandlerName = "jungleContextMenu"

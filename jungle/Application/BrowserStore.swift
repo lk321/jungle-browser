@@ -19,6 +19,10 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var closingTabIDs: Set<UUID> = []
     @Published private(set) var copiedTabAddress: URL?
     @Published private(set) var copiedScreenshotTabID: UUID?
+    /// The zoom just applied to the selected tab, while its badge is on screen. `nil` hides it.
+    @Published private(set) var pageZoomFeedback: Double?
+    /// The failure each tab's last navigation ended in, for as long as nothing has loaded over it.
+    @Published private(set) var navigationFailures: [UUID: NavigationFailure] = [:]
     @Published private(set) var developerMetricsByTabID: [UUID: DeveloperMetrics] = [:]
     @Published private(set) var initialContentReadyTabIDs: Set<UUID> = []
     @Published private(set) var audibleTabIDs: Set<UUID> = []
@@ -47,6 +51,7 @@ final class BrowserStore: ObservableObject {
     private var tabPreviewTask: Task<Void, Never>?
     private var copiedAddressFeedbackTask: Task<Void, Never>?
     private var copiedScreenshotFeedbackTask: Task<Void, Never>?
+    private var pageZoomFeedbackTask: Task<Void, Never>?
     private var closingTabTasks: [UUID: Task<Void, Never>] = [:]
     private var pictureInPictureObserver: AnyCancellable?
     private var audioObserver: AnyCancellable?
@@ -129,6 +134,7 @@ final class BrowserStore: ObservableObject {
         tabPreviewTask?.cancel()
         copiedAddressFeedbackTask?.cancel()
         copiedScreenshotFeedbackTask?.cancel()
+        pageZoomFeedbackTask?.cancel()
         closingTabTasks.values.forEach { $0.cancel() }
         persistWorkspaceTask?.cancel()
     }
@@ -147,10 +153,14 @@ final class BrowserStore: ObservableObject {
     var visibleHistory: [BrowsingHistoryEntry] { history.filter { $0.profileID == activeProfileID } }
     var visibleDownloads: [BrowserDownload] { downloads.filter { $0.profileID == activeProfileID } }
     var visibleBookmarkFolders: [BookmarkFolder] { bookmarkFolders.filter { $0.profileID == activeProfileID } }
+    /// The Quick Access tiles in the order the sidebar shows them, which is the order ⌘1…⌘9
+    /// address: the first tile is ⌘1, and reordering the tiles reorders the shortcuts with it.
+    var quickAccessBookmarks: [BrowserBookmark] { visibleBookmarkFolders.first(where: \.isQuickAccess)?.bookmarks ?? [] }
     /// The tab that keeps its web view attached to the window even while another tab is on
     /// screen, so its floating window survives the switch.
     var pictureInPictureHoldTabID: UUID? { pictureInPictureTabID ?? pictureInPictureRequestTabID }
     var isSelectedTabLoading: Bool { selectedTabID.map { loadingTabIDs.contains($0) } ?? false }
+    var selectedNavigationFailure: NavigationFailure? { selectedTabID.flatMap { navigationFailures[$0] } }
     var selectedTabInitialContentIsReady: Bool { selectedTabID.map { initialContentReadyTabIDs.contains($0) } ?? false }
     var selectedTabUsesInsecureHTTP: Bool { selectedTab.map { BrowserAddress.usesInsecureHTTP($0.address) } ?? false }
     var selectedTabIsLocalDevelopment: Bool { selectedTab.map { BrowserAddress.isLocalDevelopmentURL($0.address) } ?? false }
@@ -188,6 +198,9 @@ final class BrowserStore: ObservableObject {
         activeProfileID = tabs[index].profileID
         selectedTabID = tabID
         if previousTabID != tabID {
+            // The badge belongs to the tab it was raised over, not to the one arriving.
+            pageZoomFeedbackTask?.cancel()
+            pageZoomFeedback = nil
             previouslySelectedTabID = previousTabID
         }
         tabs[index].lastActivatedAt = .now
@@ -210,6 +223,7 @@ final class BrowserStore: ObservableObject {
         mutedTabIDs.remove(tabID)
         quickAccessTabIDs = quickAccessTabIDs.filter { $0.value != tabID }
         if copiedScreenshotTabID == tabID { copiedScreenshotTabID = nil }
+        navigationFailures.removeValue(forKey: tabID)
         releasePictureInPicture(for: tabID)
         WebViewPool.shared.discard(tabID)
         guard wasSelected else {
@@ -362,7 +376,18 @@ final class BrowserStore: ObservableObject {
         navigate(to: url.absoluteString)
     }
 
-    func reloadSelectedTab() { loadedWebView(for: selectedTab)?.reload() }
+    func reloadSelectedTab() {
+        guard let tab = selectedTab, let webView = loadedWebView(for: tab) else { return }
+        // A failed load leaves the web view holding no document, and `reload` on nothing does
+        // nothing — which is what left the error page with a button that did not work.
+        guard webView.url != nil else {
+            navigationFailures.removeValue(forKey: tab.id)
+            lastRequestedAddresses[tab.id] = tab.address
+            webView.load(URLRequest(url: tab.address))
+            return
+        }
+        webView.reload()
+    }
     func reloadSelectedTabIgnoringCache() { loadedWebView(for: selectedTab)?.reloadFromOrigin() }
 
     func togglePictureInPicture() {
@@ -443,6 +468,13 @@ final class BrowserStore: ObservableObject {
         select(tab.id)
     }
 
+    /// Opens the tile at `number`, counting from 1. A number with no tile behind it does
+    /// nothing, so ⌘7 on four tiles is a keystroke that misses rather than a surprise.
+    func openQuickAccessBookmark(number: Int) {
+        guard number >= 1, let bookmark = quickAccessBookmarks.dropFirst(number - 1).first else { return }
+        openQuickAccessBookmark(bookmark)
+    }
+
     func closeQuickAccessBookmark(_ bookmarkID: UUID) {
         guard let tabID = quickAccessTabID(for: bookmarkID) else { return }
         close(tabID)
@@ -456,6 +488,21 @@ final class BrowserStore: ObservableObject {
         )
         tabs.append(tab)
         select(tab.id)
+    }
+
+    /// The address a `target="_blank"` link may open a tab for. A link that is itself a
+    /// download gets none: WebKit downloads it from the page that asked, and a tab opened
+    /// beside it fetches the same file again and then sits blank forever.
+    static func newWindowDestination(shouldPerformDownload: Bool, requestURL: URL?) -> URL? {
+        guard !shouldPerformDownload, let requestURL, BrowserAddress.isWebURL(requestURL) else { return nil }
+        return requestURL
+    }
+
+    /// Closes a tab that only ever existed to carry a download. Its web view never receives a
+    /// document, so leaving it open is a blank tab the user has to clean up.
+    func closeTabOpenedForDownload(_ tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        close(tabID)
     }
 
     func openLinkInNewTab(_ address: URL, from sourceTabID: UUID) {
@@ -690,6 +737,40 @@ final class BrowserStore: ObservableObject {
     }
     func goBack() { if let view = loadedWebView(for: selectedTab), view.canGoBack { view.goBack() } }
     func goForward() { if let view = loadedWebView(for: selectedTab), view.canGoForward { view.goForward() } }
+    func zoomIn() { applyPageZoom { Self.pageZoomStep(above: $0) } }
+    func zoomOut() { applyPageZoom { Self.pageZoomStep(below: $0) } }
+    func resetPageZoom() { applyPageZoom { _ in 1 } }
+
+    /// The ladder Safari and Chrome step through. Clamped at both ends: a page that cannot
+    /// grow any further still shows its badge, which is how the user learns it is at the top.
+    static let pageZoomSteps: [Double] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+
+    static func pageZoomStep(above level: Double) -> Double {
+        pageZoomSteps.first(where: { $0 > level + 0.001 }) ?? pageZoomSteps[pageZoomSteps.count - 1]
+    }
+
+    static func pageZoomStep(below level: Double) -> Double {
+        pageZoomSteps.last(where: { $0 < level - 0.001 }) ?? pageZoomSteps[0]
+    }
+
+    /// `pageZoom` reflows the document the way a browser's zoom does. `magnification` is the
+    /// other WebKit knob and the wrong one: it scales the rendered pixels and goes soft.
+    ///
+    /// ponytail: the web view is the only store of a tab's zoom, so it lives as long as the
+    /// tab and resets with a new tab. Persist per host when zoom should outlive the tab.
+    private func applyPageZoom(_ nextLevel: (Double) -> Double) {
+        guard let webView = loadedWebView(for: selectedTab) else { return }
+        let level = nextLevel(webView.pageZoom)
+        webView.pageZoom = level
+        pageZoomFeedback = level
+        pageZoomFeedbackTask?.cancel()
+        pageZoomFeedbackTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            self?.pageZoomFeedback = nil
+        }
+    }
+
     func copySelectedTabAddress() {
         guard let address = selectedTab?.address, BrowserAddress.isWebURL(address) else { return }
         NSPasteboard.general.clearContents()
@@ -735,12 +816,10 @@ final class BrowserStore: ObservableObject {
     static func commandClickDestination(
         navigationType: WKNavigationType,
         modifierFlags: NSEvent.ModifierFlags,
-        shouldPerformDownload: Bool,
         requestURL: URL?
     ) -> URL? {
         guard navigationType == .linkActivated,
               modifierFlags.contains(.command),
-              !shouldPerformDownload,
               let requestURL,
               BrowserAddress.isWebURL(requestURL)
         else { return nil }
@@ -765,10 +844,15 @@ final class BrowserStore: ObservableObject {
     }
 
     func didCommitNavigation(for tabID: UUID, url: URL?) {
-        if let url { update(tabID) { $0.address = url } }
+        guard let url else { return }
+        update(tabID) { $0.address = url }
+        // A committed document covers whatever failed before it, including the same-document
+        // moves that never start a navigation. Otherwise the error page stays over a live page.
+        navigationFailures.removeValue(forKey: tabID)
     }
 
     func didStartNavigation(for tabID: UUID) {
+        navigationFailures.removeValue(forKey: tabID)
         // A new document takes the video, and its floating window, with it.
         releasePictureInPicture(for: tabID)
         audibleTabIDs.remove(tabID)
@@ -786,6 +870,7 @@ final class BrowserStore: ObservableObject {
 
     func didFinishNavigation(for tabID: UUID, title: String?, url: URL?) {
         setNavigationLoading(false, for: tabID)
+        navigationFailures.removeValue(forKey: tabID)
         // ponytail: still the reveal of last resort. A document that never reports a
         // contentful paint — a PDF, an image, an empty response — has no other signal.
         initialContentReadyTabIDs.insert(tabID)
@@ -805,9 +890,13 @@ final class BrowserStore: ObservableObject {
         WebViewPool.shared.reportDeveloperMetrics(for: tabID)
     }
 
-    func didFailNavigation(for tabID: UUID) {
+    func didFailNavigation(for tabID: UUID, error: Error) {
         setNavigationLoading(false, for: tabID)
         initialContentReadyTabIDs.insert(tabID)
+        guard let tab = tabs.first(where: { $0.id == tabID }),
+              let failure = NavigationFailure(error: error, address: tab.address)
+        else { return }
+        navigationFailures[tabID] = failure
     }
 
     func didTerminateWebContent(for tabID: UUID) {

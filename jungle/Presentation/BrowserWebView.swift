@@ -75,6 +75,7 @@ struct BrowserWebView: NSViewRepresentable {
         private var addressObservations: [UUID: NSKeyValueObservation] = [:]
         private var observedWebViewIDs: [UUID: ObjectIdentifier] = [:]
         private var downloadIDs: [ObjectIdentifier: UUID] = [:]
+        private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
 
         init(store: BrowserStore) {
             self.store = store
@@ -183,10 +184,26 @@ struct BrowserWebView: NSViewRepresentable {
             decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
+            // A link carrying `download` is answered by downloading it. Allowing the
+            // navigation instead sent the tab to the file itself, which is what left the tab
+            // blank on a page that offered an image for download. The `.download` policy is
+            // the documented answer and this WebKit answered it with nothing at all: no
+            // delegate call and no request, measured on macOS 26. The request is made the same
+            // way the context menu makes one.
+            //
+            // ponytail: only `http(s)`. `startDownload` issues a fresh request, which a
+            // `blob:` URL has no origin to serve, so a blob link keeps the old behaviour of
+            // opening in the tab rather than downloading nothing at all.
+            if navigationAction.shouldPerformDownload,
+               let address = navigationAction.request.url,
+               BrowserAddress.isWebURL(address) {
+                decisionHandler(.cancel)
+                startDownload(from: address, in: webView)
+                return
+            }
             guard let destination = BrowserStore.commandClickDestination(
                 navigationType: navigationAction.navigationType,
                 modifierFlags: navigationAction.modifierFlags,
-                shouldPerformDownload: navigationAction.shouldPerformDownload,
                 requestURL: navigationAction.request.url
             ) else {
                 decisionHandler(.allow)
@@ -210,10 +227,10 @@ struct BrowserWebView: NSViewRepresentable {
             for navigationAction: WKNavigationAction,
             windowFeatures: WKWindowFeatures
         ) -> WKWebView? {
-            guard let destination = navigationAction.request.url,
-                  BrowserAddress.isWebURL(destination),
-                  let tabID = tabID(of: webView)
-            else { return nil }
+            guard let destination = BrowserStore.newWindowDestination(
+                shouldPerformDownload: navigationAction.shouldPerformDownload,
+                requestURL: navigationAction.request.url
+            ), let tabID = tabID(of: webView) else { return nil }
             store.openLinkInNewTab(destination, from: tabID)
             return nil
         }
@@ -234,12 +251,12 @@ struct BrowserWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             guard let tabID = tabID(of: webView) else { return }
-            store.didFailNavigation(for: tabID)
+            store.didFailNavigation(for: tabID, error: error)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             guard let tabID = tabID(of: webView) else { return }
-            store.didFailNavigation(for: tabID)
+            store.didFailNavigation(for: tabID, error: error)
         }
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -252,7 +269,12 @@ struct BrowserWebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
-            configure(download: download, sourceAddress: navigationResponse.response.url ?? webView.url, tabID: tabID(of: webView))
+            let tabID = tabID(of: webView)
+            configure(download: download, sourceAddress: navigationResponse.response.url ?? webView.url, tabID: tabID)
+            // A tab a link opened only to download something never receives a document: WebKit
+            // hands the response to the downloader and leaves the tab blank forever.
+            guard let tabID, webView.url == nil, !webView.canGoBack else { return }
+            store.closeTabOpenedForDownload(tabID)
         }
 
         func download(
@@ -280,18 +302,20 @@ struct BrowserWebView: NSViewRepresentable {
         }
 
         func downloadDidFinish(_ download: WKDownload) {
+            activeDownloads.removeValue(forKey: ObjectIdentifier(download))
             guard let downloadID = downloadIDs.removeValue(forKey: ObjectIdentifier(download)) else { return }
             store.finishDownload(downloadID)
         }
 
         func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+            activeDownloads.removeValue(forKey: ObjectIdentifier(download))
             guard let downloadID = downloadIDs.removeValue(forKey: ObjectIdentifier(download)) else { return }
             store.failDownload(downloadID, errorDescription: error.localizedDescription)
         }
 
         /// WebKit's own context-menu download never reaches the app, so the menu item hands
         /// the address back here and the download is started over public API instead.
-        func startContextMenuDownload(from address: URL, in webView: WKWebView) {
+        func startDownload(from address: URL, in webView: WKWebView) {
             let tabID = tabID(of: webView)
             webView.startDownload(using: URLRequest(url: address)) { [weak self] download in
                 self?.configure(download: download, sourceAddress: address, tabID: tabID)
@@ -303,6 +327,9 @@ struct BrowserWebView: NSViewRepresentable {
             let sourceAddress = sourceAddress ?? BrowserAddress.home
             let downloadID = store.beginDownload(for: tabID, sourceAddress: sourceAddress)
             downloadIDs[ObjectIdentifier(download)] = downloadID
+            // `WKDownload` holds its delegate and its web view weakly and nothing else keeps it
+            // alive, so closing the tab it came from would otherwise cancel the transfer.
+            activeDownloads[ObjectIdentifier(download)] = download
             download.delegate = self
         }
     }
