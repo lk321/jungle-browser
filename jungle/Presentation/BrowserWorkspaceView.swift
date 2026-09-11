@@ -182,6 +182,13 @@ struct BrowserWorkspaceView: View {
                     }
                     .padding(18)
                 }
+                // The window has no titlebar, so the top of the page doubles as one. It takes
+                // no space and hands its clicks back to the page, so nothing here moves.
+                .overlay(alignment: .top) {
+                    ContentHeaderDragArea()
+                        .frame(height: ContentHeaderDragArea.height)
+                        .accessibilityHidden(true)
+                }
                 .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
                 .animation(.easeOut(duration: 0.16), value: store.copiedTabAddress)
             }
