@@ -18,6 +18,10 @@ final class WebViewPool {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: profile.dataStoreID)
         configuration.preferences.isElementFullscreenEnabled = true
+        // WebKit defaults this to true on macOS, which is what lets an ad script call
+        // `window.open` from a timer or a page load with no click behind it. Off, WebKit
+        // itself refuses those and only a real user gesture can still open a window.
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         // ponytail: WKWebView keeps Picture in Picture and the programmatic Web Inspector
         // switched off, and neither has a public setter. These two keys are the whole difference.
         configuration.preferences.setValue(true, forKey: "allowsPictureInPictureMediaPlayback")
@@ -49,6 +53,7 @@ final class WebViewPool {
         configuration.userContentController.addUserScript(JungleWebView.contextMenuScript)
         configuration.userContentController.addUserScript(DeveloperDiagnostics.userScript)
         configuration.userContentController.addUserScript(LinkPrewarming.userScript)
+        configuration.userContentController.addUserScript(AntiAdblockDefusing.userScript)
         configuration.userContentController.addUserScript(YouTubeAdBlocking.userScript)
         configuration.userContentController.addUserScript(YouTubeAdBlocking.playerScript)
         ContentBlocking.shared.install(on: configuration.userContentController)

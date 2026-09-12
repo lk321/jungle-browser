@@ -1083,6 +1083,52 @@ final class JungleTests: XCTestCase {
     }
 
     @MainActor
+    /// The two halves of an anti-adblock page: the detector that reports the blocker, and the
+    /// wall it puts up afterwards. Neither knows about any particular site.
+    @MainActor
+    func testAntiAdblockDefusingAnswersDetectorsAndTakesDownTheWall() async throws {
+        let controller = WKUserContentController()
+        controller.addUserScript(AntiAdblockDefusing.userScript)
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = controller
+        let webView = WKWebView(frame: .init(x: 0, y: 0, width: 900, height: 700), configuration: configuration)
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            """
+            <!doctype html><html><body>
+            <div id="wall" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999">
+            Please disable AdBlock to watch this video</div>
+            <script>
+              document.body.style.overflow = 'hidden';
+              window.detectorSaidBlocked = null;
+              var probe = new FuckAdBlock();
+              probe.onDetected(function () { window.detectorSaidBlocked = true; });
+              probe.onNotDetected(function () { window.detectorSaidBlocked = false; });
+              probe.check();
+            </script>
+            </body></html>
+            """,
+            baseURL: try XCTUnwrap(URL(string: "https://player.example/watch"))
+        )
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        try await Task.sleep(for: .seconds(2))
+
+        let result = try await webView.evaluateJavaScript(
+            """
+            [
+                window.canRunAds === true,
+                window.isAdBlockActive === false,
+                window.detectorSaidBlocked === false,
+                document.getElementById('wall') === null,
+                getComputedStyle(document.body).overflow !== 'hidden'
+            ].join(',')
+            """
+        ) as? String
+
+        XCTAssertEqual(result, "true,true,true,true,true")
+    }
+
     func testYouTubeAdPlacementsAreStrippedFromThePlayerResponse() async throws {
         let controller = WKUserContentController()
         controller.addUserScript(YouTubeAdBlocking.playerScript)
@@ -1178,35 +1224,160 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(untouched, true)
     }
 
+    private func networkRules(_ source: String) throws -> [[String: Any]] {
+        let json = ContentBlockerRuleCompiler.compile(source).network
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+    }
+
+    private func cosmeticRules(_ source: String) throws -> [[String: Any]] {
+        let json = ContentBlockerRuleCompiler.compile(source).cosmetic
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+    }
+
     func testContentRuleCompilerTranslatesHostRulesAndExceptions() throws {
-        let source = """
+        let rules = try networkRules("""
         ||ads.example.com^$script,third-party
         @@||ads.example.com^$domain=trusted.example
-        /not-a-host-rule/
-        """
-
-        let json = ContentBlockerRuleCompiler.compile(source)
-        let rules = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+        """)
 
         XCTAssertEqual(rules.count, 2)
         XCTAssertEqual((rules[0]["action"] as? [String: Any])?["type"] as? String, "block")
         XCTAssertEqual((rules[0]["trigger"] as? [String: Any])?["resource-type"] as? [String], ["script"])
         XCTAssertEqual((rules[0]["trigger"] as? [String: Any])?["load-type"] as? [String], ["third-party"])
         XCTAssertEqual((rules[1]["action"] as? [String: Any])?["type"] as? String, "ignore-previous-rules")
-        XCTAssertEqual((rules[1]["trigger"] as? [String: Any])?["if-domain"] as? [String], ["trusted.example"])
+        // The leading star is what makes a domain cover its subdomains. Without it WebKit
+        // matches the bare host only, which is never what a filter list means.
+        XCTAssertEqual((rules[1]["trigger"] as? [String: Any])?["if-domain"] as? [String], ["*trusted.example"])
+    }
+
+    func testContentRuleCompilerTranslatesPathFiltersHostRulesCannotReach() throws {
+        let rules = try networkRules("""
+        /banner-ads/*
+        |http://ads.tracker.example/pixel|
+        """)
+
+        let filters = rules.compactMap { ($0["trigger"] as? [String: Any])?["url-filter"] as? String }
+        XCTAssertEqual(filters.count, 2)
+        XCTAssertEqual(filters[0], "\\/banner-ads\\/.*")
+        XCTAssertEqual(filters[1], "^http:\\/\\/ads\\.tracker\\.example\\/pixel$")
+        XCTAssertTrue(filters.allSatisfy { (try? NSRegularExpression(pattern: $0)) != nil })
+    }
+
+    func testContentRuleCompilerDropsFiltersWebKitWouldRejectOrMisread() throws {
+        let rules = try networkRules("""
+        ||example.com^$csp=script-src 'none'
+        ||example.com^$removeparam=fbclid
+        ||example.com^$domain=entity.*
+        ||no-dot-host^
+        /ad
+        """)
+
+        // A header or parameter rule read as a block takes the whole site down with it, an
+        // entity domain has no WebKit spelling, and a three-character pattern matches the web.
+        XCTAssertTrue(rules.isEmpty)
+    }
+
+    func testContentRuleCompilerTranslatesElementHidingIntoItsOwnList() throws {
+        let source = """
+        ##.generic-ad
+        shop.example,~news.example##.sponsored
+        shop.example##div:has(> .promo)
+        @@||shop.example^$elemhide
+        """
+        let network = try networkRules(source)
+        let cosmetic = try cosmeticRules(source)
+
+        // The element-hiding exception must not appear in the network list, or it would lift
+        // that site's network blocking too.
+        XCTAssertTrue(network.isEmpty)
+
+        let hiding = cosmetic.filter { ($0["action"] as? [String: Any])?["type"] as? String == "css-display-none" }
+        XCTAssertEqual(hiding.count, 2)
+        XCTAssertNil((hiding[0]["trigger"] as? [String: Any])?["if-domain"])
+        XCTAssertEqual((hiding[0]["action"] as? [String: Any])?["selector"] as? String, ".generic-ad")
+        XCTAssertEqual((hiding[1]["trigger"] as? [String: Any])?["if-domain"] as? [String], ["*shop.example"])
+        // `:has()` is procedural in filter syntax; WebKit rejects the list that carries it.
+        XCTAssertEqual((hiding[1]["action"] as? [String: Any])?["selector"] as? String, ".sponsored")
+        XCTAssertEqual((cosmetic.last?["action"] as? [String: Any])?["type"] as? String, "ignore-previous-rules")
     }
 
     @MainActor
     func testGeneratedContentRulesCompileInWebKit() async throws {
-        let source = ContentBlockerRuleCompiler.compile("||tracker.example^$third-party,script")
+        let ruleSet = ContentBlockerRuleCompiler.compile("""
+        ||tracker.example^$third-party,script
+        ##.generic-ad
+        shop.example##.sponsored
+        """)
         let store = try XCTUnwrap(WKContentRuleListStore.default())
-        let identifier = "jungle.tests.\(UUID().uuidString)"
-        defer { Task { try? await store.removeContentRuleList(forIdentifier: identifier) } }
 
-        let compiled = try await store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: source)
-        let list = try XCTUnwrap(compiled)
+        for source in [ruleSet.network, ruleSet.cosmetic] {
+            let identifier = "jungle.tests.\(UUID().uuidString)"
+            defer { Task { try? await store.removeContentRuleList(forIdentifier: identifier) } }
+            let list = try await store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: source)
+            XCTAssertEqual(try XCTUnwrap(list).identifier, identifier)
+        }
+    }
 
-        XCTAssertEqual(list.identifier, identifier)
+    func testScriptedPopupsAreSpacedOutAndClickedLinksAreNot() {
+        let opened = Date()
+        let interval = BrowserStore.scriptedPopupInterval
+
+        // The first window a script asks for always opens: answering nil is what tells a page
+        // its popup was blocked, and pages run a download fallback when they hear that.
+        XCTAssertTrue(
+            BrowserStore.shouldAllowPopup(
+                isFromEmbeddedOtherSiteFrame: false, isLinkActivated: false, lastScriptedPopupAt: nil, now: opened
+            )
+        )
+        // The rest of the burst does not.
+        XCTAssertFalse(
+            BrowserStore.shouldAllowPopup(
+                isFromEmbeddedOtherSiteFrame: false,
+                isLinkActivated: false,
+                lastScriptedPopupAt: opened,
+                now: opened.addingTimeInterval(interval / 2)
+            )
+        )
+        XCTAssertTrue(
+            BrowserStore.shouldAllowPopup(
+                isFromEmbeddedOtherSiteFrame: false,
+                isLinkActivated: false,
+                lastScriptedPopupAt: opened,
+                now: opened.addingTimeInterval(interval)
+            )
+        )
+        // A second click is a second decision by the user, whenever it lands.
+        XCTAssertTrue(
+            BrowserStore.shouldAllowPopup(
+                isFromEmbeddedOtherSiteFrame: false, isLinkActivated: true, lastScriptedPopupAt: opened, now: opened
+            )
+        )
+    }
+
+    /// An embedded video player that answers a click with a window to a throwaway ad domain is
+    /// the popunder every streaming site ships, and no filter list reaches it: the frame is the
+    /// content the user came for and the destination is new every time.
+    func testPopupsFromAnEmbeddedOtherSiteFrameNeverOpen() {
+        // Scripted, and clicked as a link — these players put an anchor over the picture.
+        for wasClickedAsLink in [false, true] {
+            XCTAssertFalse(
+                BrowserStore.shouldAllowPopup(
+                    isFromEmbeddedOtherSiteFrame: true,
+                    isLinkActivated: wasClickedAsLink,
+                    lastScriptedPopupAt: nil
+                )
+            )
+        }
+    }
+
+    func testAFrameCountsAsThePageItselfOnlyWhenItBelongsToTheSameSite() {
+        XCTAssertTrue(BrowserStore.isSameSite(frameHost: "animeflv.or.at", pageHost: "animeflv.or.at"))
+        // A page embedding its own player keeps the windows that player opens.
+        XCTAssertTrue(BrowserStore.isSameSite(frameHost: "player.animeflv.or.at", pageHost: "animeflv.or.at"))
+        XCTAssertFalse(BrowserStore.isSameSite(frameHost: "animeav1.uns.bio", pageHost: "animeflv.or.at"))
+        // A frame with no origin of its own is not the page.
+        XCTAssertFalse(BrowserStore.isSameSite(frameHost: "", pageHost: "animeflv.or.at"))
+        XCTAssertFalse(BrowserStore.isSameSite(frameHost: nil, pageHost: "animeflv.or.at"))
     }
 
     func testSidebarDragSnapsToTheNearestStep() {

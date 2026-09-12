@@ -218,6 +218,7 @@ final class BrowserStore: ObservableObject {
         loadingTabIDs.remove(tabID)
         initialContentReadyTabIDs.remove(tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
+        lastScriptedPopupDates.removeValue(forKey: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
         audibleTabIDs.remove(tabID)
         mutedTabIDs.remove(tabID)
@@ -496,6 +497,61 @@ final class BrowserStore: ObservableObject {
     static func newWindowDestination(shouldPerformDownload: Bool, requestURL: URL?) -> URL? {
         guard !shouldPerformDownload, let requestURL, BrowserAddress.isWebURL(requestURL) else { return nil }
         return requestURL
+    }
+
+    /// How long a tab has to wait before a script may open a second window. A burst of
+    /// `window.open` calls inside one click is the whole popup-flood technique, and WebKit's
+    /// gesture requirement does not bound it: every call in that handler carries the gesture.
+    nonisolated static let scriptedPopupInterval: TimeInterval = 1
+
+    /// Whether this tab may open one more window right now.
+    ///
+    /// An embedded frame from another site never gets one. A video player, an ad slot, or any
+    /// third-party widget asking for a window is asking on its own behalf, not the user's:
+    /// the click that reached it was meant for the thing it is embedded as. This is the whole
+    /// popunder technique on streaming sites, and it is the one case a filter list cannot
+    /// reach, because the frame opening the window is the content the user came for and its
+    /// destinations are fresh throwaway domains.
+    ///
+    /// Everything the page itself asks for is judged as before. A link the user clicked always
+    /// opens: a second click is a second decision, and answering `nil` to one tells the page
+    /// its popup was blocked, which is what makes a page run the download fallback it has.
+    /// Only scripted windows are spaced out, so the first of a burst still opens and the rest
+    /// do not.
+    nonisolated static func shouldAllowPopup(
+        isFromEmbeddedOtherSiteFrame: Bool,
+        isLinkActivated: Bool,
+        lastScriptedPopupAt: Date?,
+        now: Date = .now
+    ) -> Bool {
+        // Checked before the clicked-link allowance on purpose: these players put a bare
+        // `target="_blank"` anchor over the picture, so the ad arrives as a link click.
+        if isFromEmbeddedOtherSiteFrame { return false }
+        if isLinkActivated { return true }
+        guard let lastScriptedPopupAt else { return true }
+        return now.timeIntervalSince(lastScriptedPopupAt) >= scriptedPopupInterval
+    }
+
+    /// Whether a frame belongs to the site the tab is showing. Hosts under one another count
+    /// as the same site, so a page embedding its own player keeps the windows it opens.
+    nonisolated static func isSameSite(frameHost: String?, pageHost: String?) -> Bool {
+        guard let frameHost = frameHost?.lowercased(), let pageHost = pageHost?.lowercased(),
+              !frameHost.isEmpty, !pageHost.isEmpty else { return false }
+        if frameHost == pageHost { return true }
+        return frameHost.hasSuffix("." + pageHost) || pageHost.hasSuffix("." + frameHost)
+    }
+
+    /// The instant this tab last opened a scripted window, which is what spaces the next one out.
+    private var lastScriptedPopupDates: [UUID: Date] = [:]
+
+    func allowsPopup(from sourceTabID: UUID, isFromEmbeddedOtherSiteFrame: Bool, isLinkActivated: Bool) -> Bool {
+        guard Self.shouldAllowPopup(
+            isFromEmbeddedOtherSiteFrame: isFromEmbeddedOtherSiteFrame,
+            isLinkActivated: isLinkActivated,
+            lastScriptedPopupAt: lastScriptedPopupDates[sourceTabID]
+        ) else { return false }
+        if !isLinkActivated { lastScriptedPopupDates[sourceTabID] = .now }
+        return true
     }
 
     /// Closes a tab that only ever existed to carry a download. Its web view never receives a

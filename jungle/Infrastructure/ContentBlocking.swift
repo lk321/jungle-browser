@@ -72,8 +72,15 @@ final class ContentBlocking {
         applyActiveLists()
     }
 
+    private var allListKeys: [String] {
+        let feedKeys = Self.primaryFeeds.map(\.key) + [Self.fallbackFeed?.key].compactMap { $0 }
+        return ["bootstrap"] + feedKeys.flatMap { [$0, Self.cosmeticKey(for: $0)] }
+    }
+
+    private static func cosmeticKey(for feedKey: String) -> String { "\(feedKey).cosmetic" }
+
     private func restoreCachedLists() async {
-        for key in ["bootstrap"] + Self.primaryFeeds.map(\.key) + [Self.fallbackFeed?.key].compactMap({ $0 }) {
+        for key in allListKeys {
             guard let identifier = defaults.string(forKey: identifierKey(for: key)),
                   let list = await lookUp(identifier: identifier) else { continue }
             activeLists[key] = list
@@ -83,11 +90,11 @@ final class ContentBlocking {
 
     private func installBootstrapRulesIfNeeded() async {
         guard activeLists["bootstrap"] == nil else { return }
-        let source = ContentBlockerRuleCompiler.compile(
+        let ruleSet = ContentBlockerRuleCompiler.compile(
             Self.bootstrapDomains.map { "||\($0)^$third-party" }.joined(separator: "\n"),
             maximumRuleCount: Self.bootstrapDomains.count
         )
-        await compileAndActivate(source, key: "bootstrap")
+        _ = await compileAndActivate(ruleSet.network, key: "bootstrap")
     }
 
     private func refreshIfDue() async {
@@ -113,6 +120,7 @@ final class ContentBlocking {
             }
         } else {
             deactivateList(key: "fallback")
+            deactivateList(key: Self.cosmeticKey(for: "fallback"))
         }
 
         if didRefresh { defaults.set(Date.now, forKey: "contentBlocking.lastRefresh") }
@@ -136,35 +144,58 @@ final class ContentBlocking {
         var request = URLRequest(url: feed.url)
         request.timeoutInterval = 30
         request.setValue("Jungle content blocker/1.0", forHTTPHeaderField: "User-Agent")
-        if let etag = defaults.string(forKey: etagKey(for: feed.key)) {
+        // A conditional request is only safe to make while every list it would answer for is
+        // actually loaded. Sending the tag with a list missing earns a 304, and a 304 taken as
+        // success leaves that list empty until the feed changes upstream — which is how a
+        // browser ends up quietly blocking nothing.
+        if isFullyLoaded(feed), let etag = defaults.string(forKey: etagKey(for: feed.key)) {
             request.setValue(etag, forHTTPHeaderField: "If-None-Match")
         }
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let response = response as? HTTPURLResponse else { return false }
-            if response.statusCode == 304 { return true }
+            if response.statusCode == 304 { return isFullyLoaded(feed) }
             guard response.statusCode == 200,
                   let filters = String(data: data, encoding: .utf8) else { return false }
 
-            let rules = await Task.detached(priority: .utility) {
+            let ruleSet = await Task.detached(priority: .utility) {
                 ContentBlockerRuleCompiler.compile(filters, maximumRuleCount: feed.maximumRuleCount)
             }.value
-            guard !rules.isEmpty else { return false }
-            await compileAndActivate(rules, key: feed.key)
+            guard !ruleSet.isEmpty else { return false }
+
+            // Network rules are the feed's reason to exist; element hiding is an improvement
+            // on top. A cosmetic list WebKit rejects must not cost the site its network rules.
+            guard await compileAndActivate(ruleSet.network, key: feed.key) else { return false }
+            let cosmeticKey = Self.cosmeticKey(for: feed.key)
+            if ruleSet.cosmetic == "[]" {
+                deactivateList(key: cosmeticKey)
+                defaults.set(false, forKey: expectsCosmeticKey(for: feed.key))
+            } else {
+                guard await compileAndActivate(ruleSet.cosmetic, key: cosmeticKey) else { return false }
+                defaults.set(true, forKey: expectsCosmeticKey(for: feed.key))
+            }
+
+            // Recorded last, so a feed whose rules WebKit refused is fetched again in full
+            // next time instead of being answered with a 304 forever.
             if let etag = response.value(forHTTPHeaderField: "Etag") {
                 defaults.set(etag, forKey: etagKey(for: feed.key))
             }
-            return activeLists[feed.key] != nil
+            return true
         } catch {
             return false
         }
     }
 
-    private func compileAndActivate(_ source: String, key: String) async {
+    /// Compiles one rule list and puts it in front of every tab. Reports whether the list is
+    /// live afterwards: an older list left over from a previous launch is not a new one.
+    private func compileAndActivate(_ source: String, key: String) async -> Bool {
         let digest = SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
         let identifier = "jungle.content.\(key).\(digest.prefix(16))"
-        guard let list = await compile(source, identifier: identifier) else { return }
+        // Identical rules compile to an identical identifier, so an unchanged feed costs
+        // nothing beyond the download: WebKit keeps the compiled bytecode on disk and maps it.
+        if defaults.string(forKey: identifierKey(for: key)) == identifier, activeLists[key] != nil { return true }
+        guard let list = await compile(source, identifier: identifier) else { return false }
 
         let oldIdentifier = defaults.string(forKey: identifierKey(for: key))
         activeLists[key] = list
@@ -174,6 +205,7 @@ final class ContentBlocking {
         if let oldIdentifier, oldIdentifier != identifier {
             try? await store?.removeContentRuleList(forIdentifier: oldIdentifier)
         }
+        return true
     }
 
     private func applyActiveLists() {
@@ -210,6 +242,15 @@ final class ContentBlocking {
         }
     }
 
+    /// Whether every list this feed compiles into is live right now. A feed whose element
+    /// hiding failed is not refreshed, however healthy its network rules look.
+    private func isFullyLoaded(_ feed: Feed) -> Bool {
+        guard activeLists[feed.key] != nil else { return false }
+        guard defaults.bool(forKey: expectsCosmeticKey(for: feed.key)) else { return true }
+        return activeLists[Self.cosmeticKey(for: feed.key)] != nil
+    }
+
+    private func expectsCosmeticKey(for key: String) -> String { "contentBlocking.hasCosmetic.\(key)" }
     private func identifierKey(for key: String) -> String { "contentBlocking.identifier.\(key)" }
     private func etagKey(for key: String) -> String { "contentBlocking.etag.\(key)" }
     private func lastSuccessfulRefreshKey(for key: String) -> String { "contentBlocking.lastSuccessful.\(key)" }
@@ -224,132 +265,4 @@ final class ContentBlocking {
         "quantserve.com", "scorecardresearch.com", "segment.io", "segment.com", "sentry.io",
         "taboola.com", "tealiumiq.com", "tiktok.com", "twimg.com", "twitter.com", "zedo.com"
     ]
-}
-
-enum ContentBlockerRuleCompiler {
-    nonisolated static func compile(_ filters: String, maximumRuleCount: Int = 75_000) -> String {
-        guard let hostRule = try? NSRegularExpression(
-            pattern: #"^\|\|([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?:\^|\$)"#
-        ) else { return "[]" }
-        var blockingRules: [ContentBlockerRule] = []
-        var exceptionRules: [ContentBlockerRule] = []
-        var seenRules = Set<String>()
-
-        filters.enumerateLines { rawLine, stop in
-            guard blockingRules.count + exceptionRules.count < maximumRuleCount else {
-                stop = true
-                return
-            }
-
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.hasPrefix("!"), !line.hasPrefix("["), !line.contains("##") else { return }
-
-            let isException = line.hasPrefix("@@")
-            let filter = isException ? String(line.dropFirst(2)) : line
-            guard let rule = makeRule(from: filter, action: isException ? .ignorePreviousRules : .block, hostRule: hostRule) else { return }
-            guard seenRules.insert("\(isException ? "@" : "")\(rule.deduplicationKey)").inserted else { return }
-            if isException { exceptionRules.append(rule) } else { blockingRules.append(rule) }
-        }
-
-        let rules = blockingRules + exceptionRules
-        guard let data = try? JSONEncoder().encode(rules) else { return "[]" }
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    nonisolated private static func makeRule(
-        from filter: String,
-        action: ContentBlockerRule.Action,
-        hostRule: NSRegularExpression
-    ) -> ContentBlockerRule? {
-        let parts = filter.split(separator: "$", maxSplits: 1, omittingEmptySubsequences: false)
-        let pattern = String(parts[0])
-        let range = NSRange(pattern.startIndex..., in: pattern)
-        guard let match = hostRule.firstMatch(in: pattern, range: range),
-              let domainRange = Range(match.range(at: 1), in: pattern) else { return nil }
-
-        let domain = String(pattern[domainRange]).lowercased()
-        guard domain.contains("."), !domain.contains("..") else { return nil }
-        let escapedDomain = NSRegularExpression.escapedPattern(for: domain)
-        // WebKit permits anchors only at the ends of a filter. URLs have a path,
-        // query, or port after the host, so an explicit host delimiter remains
-        // precise without relying on an unsupported in-expression end anchor.
-        let urlFilter = "^https?://([A-Za-z0-9-]+\\.)*\(escapedDomain)[/:?]"
-        let modifiers = parts.count == 2 ? parts[1].split(separator: ",").map(String.init) : []
-        let trigger = makeTrigger(urlFilter: urlFilter, modifiers: modifiers)
-        return ContentBlockerRule(trigger: trigger, action: action)
-    }
-
-    nonisolated private static func makeTrigger(urlFilter: String, modifiers: [String]) -> ContentBlockerRule.Trigger {
-        let resourceTypes = modifiers.compactMap(resourceType(from:))
-        let loadType: [String]?
-        if modifiers.contains("third-party") { loadType = ["third-party"] }
-        else if modifiers.contains("~third-party") { loadType = ["first-party"] }
-        else { loadType = nil }
-
-        let domainModifier = modifiers.first(where: { $0.hasPrefix("domain=") })
-        let domains = domainModifier.map { String($0.dropFirst("domain=".count)).split(separator: "|").map(String.init) } ?? []
-        let positiveDomains = domains.filter { !$0.hasPrefix("~") }
-        let negativeDomains = domains.filter { $0.hasPrefix("~") }.map { String($0.dropFirst()) }
-
-        return ContentBlockerRule.Trigger(
-            urlFilter: urlFilter,
-            resourceTypes: resourceTypes.isEmpty ? nil : resourceTypes,
-            loadTypes: loadType,
-            ifDomains: negativeDomains.isEmpty ? positiveDomains.nilIfEmpty : nil,
-            unlessDomains: positiveDomains.isEmpty ? negativeDomains.nilIfEmpty : nil
-        )
-    }
-
-    nonisolated private static func resourceType(from modifier: String) -> String? {
-        switch modifier {
-        case "image": "image"
-        case "script": "script"
-        case "stylesheet": "style-sheet"
-        case "font": "font"
-        case "media": "media"
-        case "popup": "popup"
-        case "document", "subdocument": "document"
-        case "xmlhttprequest", "ping", "websocket", "other": "raw"
-        default: nil
-        }
-    }
-}
-
-nonisolated private struct ContentBlockerRule: Encodable, Sendable {
-    struct Trigger: Encodable {
-        let urlFilter: String
-        let resourceTypes: [String]?
-        let loadTypes: [String]?
-        let ifDomains: [String]?
-        let unlessDomains: [String]?
-
-        enum CodingKeys: String, CodingKey {
-            case urlFilter = "url-filter"
-            case resourceTypes = "resource-type"
-            case loadTypes = "load-type"
-            case ifDomains = "if-domain"
-            case unlessDomains = "unless-domain"
-        }
-    }
-
-    struct Action: Encodable {
-        enum Kind: String, Encodable {
-            case block
-            case ignorePreviousRules = "ignore-previous-rules"
-        }
-
-        static let block = Action(type: .block)
-        static let ignorePreviousRules = Action(type: .ignorePreviousRules)
-
-        let type: Kind
-    }
-
-    let trigger: Trigger
-    let action: Action
-
-    var deduplicationKey: String { "\(trigger.urlFilter)|\(action.type.rawValue)|\(trigger.loadTypes?.joined(separator: ",") ?? "")" }
-}
-
-nonisolated private extension Array where Element == String {
-    var nilIfEmpty: [String]? { isEmpty ? nil : self }
 }

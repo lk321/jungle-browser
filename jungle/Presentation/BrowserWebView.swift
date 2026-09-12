@@ -223,6 +223,11 @@ struct BrowserWebView: NSViewRepresentable {
         /// ponytail: a popup opened at `about:blank` for the page to write into is still
         /// dropped. Serving one means a tab with no address to show; add it if a site that
         /// matters actually needs it.
+        ///
+        /// A window a script asked for is also spaced out from the last one the same tab
+        /// opened. WebKit already refuses windows with no user gesture behind them; what it
+        /// does not bound is the burst of `window.open` calls a single click can carry, which
+        /// is how an ad page puts five windows on screen at once.
         func webView(
             _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,
@@ -233,11 +238,23 @@ struct BrowserWebView: NSViewRepresentable {
                 shouldPerformDownload: navigationAction.shouldPerformDownload,
                 requestURL: navigationAction.request.url
             ), let tabID = tabID(of: webView),
+                  store.allowsPopup(
+                      from: tabID,
+                      isFromEmbeddedOtherSiteFrame: Self.isEmbeddedOtherSiteFrame(navigationAction.sourceFrame, in: webView),
+                      isLinkActivated: navigationAction.navigationType == .linkActivated
+                  ),
                   let popupTabID = store.openPopupTab(from: tabID, address: destination)
             else { return nil }
             let popup = WebViewPool.shared.adoptPopup(configuration: configuration, for: popupTabID)
             attach(to: popup, tabID: popupTabID)
             return popup
+        }
+
+        /// Whether the window was asked for by a frame embedded from another site, rather than
+        /// by the page the tab is showing.
+        private static func isEmbeddedOtherSiteFrame(_ frame: WKFrameInfo, in webView: WKWebView) -> Bool {
+            guard !frame.isMainFrame else { return false }
+            return !BrowserStore.isSameSite(frameHost: frame.securityOrigin.host, pageHost: webView.url?.host)
         }
 
         func webView(
