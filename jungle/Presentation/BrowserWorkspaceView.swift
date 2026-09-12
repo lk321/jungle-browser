@@ -56,8 +56,12 @@ struct BrowserWorkspaceView: View {
             addressInput = store.selectedTabAddressText
             store.beginMemoryHousekeeping()
             ContentBlocking.shared.start()
+            applyAdBlockingOptions(store.settings.adBlocking)
             ApplicationIconController.update(for: store.settings.appearance)
             publishTrafficLightsVisibility()
+        }
+        .onChange(of: store.settings.adBlocking) { _, options in
+            applyAdBlockingOptions(options)
         }
         .onChange(of: store.settings.appearance) { _, appearance in
             ApplicationIconController.update(for: appearance)
@@ -223,6 +227,16 @@ struct BrowserWorkspaceView: View {
             .animation(.easeIn(duration: 0.16), value: store.isClosingTab(tab.id))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// Carries the user's blocker switches to the two places that act on them: the rule lists
+    /// WebKit applies per tab, and the scripts a tab runs in the page.
+    private func applyAdBlockingOptions(_ options: AdBlockingOptions) {
+        ContentBlocking.shared.setBlocking(
+            adsAndTrackers: options.blocksAdsAndTrackers,
+            hidesAdSpace: options.hidesBlockedAdSpace
+        )
+        WebViewPool.shared.setAdBlockingOptions(options)
     }
 
     private func publishTrafficLightsVisibility() {

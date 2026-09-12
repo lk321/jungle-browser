@@ -122,6 +122,22 @@ enum BrowserAppearance: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// What the blocker is allowed to do. One value, so a change to any part of it reaches the
+/// browser as a single update instead of five separate ones.
+struct AdBlockingOptions: Equatable, Sendable {
+    /// The filter lists themselves: the ad and tracker requests never leave the machine.
+    var blocksAdsAndTrackers = true
+    /// Element hiding, which closes the empty frame an ad left behind. Kept separate because
+    /// it is the part that can take a piece of a page with it.
+    var hidesBlockedAdSpace = true
+    /// Answers the pages that refuse to work until the blocker is off.
+    var bypassesAdblockWalls = true
+    /// A window an embedded player asks for is the ad, not the video.
+    var blocksEmbeddedPlayerPopups = true
+    /// Skips the ads inside a YouTube video, which no network list can reach.
+    var skipsYouTubeAds = true
+}
+
 @MainActor
 final class BrowserSettings: ObservableObject {
     @Published var searchEngine: BrowserSearchEngine { didSet { save() } }
@@ -130,6 +146,7 @@ final class BrowserSettings: ObservableObject {
     @Published var appearance: BrowserAppearance { didSet { save() } }
     @Published var tabSleepInterval: TimeInterval { didSet { save() } }
     @Published var sidebarWidth: CGFloat { didSet { save() } }
+    @Published var adBlocking: AdBlockingOptions { didSet { save() } }
     private let persistence: BrowserPersistence
 
     /// How long a tab may sit untouched before its web process is released. One minute meant a
@@ -149,6 +166,15 @@ final class BrowserSettings: ObservableObject {
         // Anything the store hands back is snapped: a width between steps would leave the
         // sidebar in a layout no step describes.
         sidebarWidth = SidebarStep.nearest(to: saved.sidebarWidth.map { CGFloat($0) } ?? SidebarStep.full.width).width
+        // A stored blocker preference is a switch the user turned off. Anything never written
+        // stays on, so an existing install keeps the protection it already had.
+        adBlocking = AdBlockingOptions(
+            blocksAdsAndTrackers: saved.blocksAdsAndTrackers ?? true,
+            hidesBlockedAdSpace: saved.hidesBlockedAdSpace ?? true,
+            bypassesAdblockWalls: saved.bypassesAdblockWalls ?? true,
+            blocksEmbeddedPlayerPopups: saved.blocksEmbeddedPlayerPopups ?? true,
+            skipsYouTubeAds: saved.skipsYouTubeAds ?? true
+        )
     }
 
     var newTabURL: URL {
@@ -162,7 +188,8 @@ final class BrowserSettings: ObservableObject {
             customNewTabAddress: customNewTabAddress,
             appearance: appearance,
             tabSleepInterval: tabSleepInterval,
-            sidebarWidth: sidebarWidth
+            sidebarWidth: sidebarWidth,
+            adBlocking: adBlocking
         )
     }
 }

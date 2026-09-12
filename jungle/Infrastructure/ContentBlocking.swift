@@ -1,3 +1,4 @@
+import Combine
 import CryptoKit
 import Foundation
 import WebKit
@@ -7,8 +8,14 @@ import WebKit
 /// are parsed into their safe, host-anchored network rules only; unsupported
 /// filter syntax is deliberately ignored rather than guessed.
 @MainActor
-final class ContentBlocking {
+final class ContentBlocking: ObservableObject {
     static let shared = ContentBlocking()
+
+    /// What the settings screen shows about the lists: when they last changed and whether a
+    /// check is running right now.
+    @Published private(set) var lastRefresh: Date?
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var activeRuleListCount = 0
 
     private struct Feed: Sendable {
         let key: String
@@ -34,11 +41,19 @@ final class ContentBlocking {
     )
     private static let maximumPrimaryStaleness: TimeInterval = 60 * 60 * 24 * 7
 
+    /// EasyList is rebuilt several times a day and its server asks for a two-hour cache, so a
+    /// daily check left the browser up to a day behind the domains it is meant to block. Six
+    /// hours is four conditional requests a day; an unchanged feed answers 304 and costs
+    /// nothing beyond the round trip.
+    static let refreshInterval: TimeInterval = 60 * 60 * 6
+
     private let store = WKContentRuleListStore.default()
     private let defaults = UserDefaults.standard
     private var activeLists: [String: WKContentRuleList] = [:]
     private var extensionLists: [String: WKContentRuleList] = [:]
     private var updateTask: Task<Void, Never>?
+    private var blocksAdsAndTrackers = true
+    private var hidesBlockedAdSpace = true
 
     private init() {}
 
@@ -53,7 +68,7 @@ final class ContentBlocking {
             await self.refreshIfDue()
 
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(86_400))
+                try? await Task.sleep(for: .seconds(Self.refreshInterval))
                 guard !Task.isCancelled else { return }
                 await self.refreshIfDue()
             }
@@ -62,6 +77,24 @@ final class ContentBlocking {
 
     func install(on controller: WKUserContentController) {
         allActiveLists.forEach(controller.add(_:))
+    }
+
+    /// Turns the two halves of the blocker on or off. Takes effect on every open tab at once:
+    /// WebKit applies content rules per web view, so nothing has to reload.
+    func setBlocking(adsAndTrackers: Bool, hidesAdSpace: Bool) {
+        guard blocksAdsAndTrackers != adsAndTrackers || hidesBlockedAdSpace != hidesAdSpace else { return }
+        blocksAdsAndTrackers = adsAndTrackers
+        hidesBlockedAdSpace = hidesAdSpace
+        applyActiveLists()
+    }
+
+    /// Checks the feeds now, whatever the schedule says.
+    func refreshNow() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defaults.removeObject(forKey: "contentBlocking.lastRefresh")
+        await refreshIfDue()
+        isRefreshing = false
     }
 
     /// Declarative extension rules share the same WebKit content-rule pipeline as
@@ -124,6 +157,7 @@ final class ContentBlocking {
         }
 
         if didRefresh { defaults.set(Date.now, forKey: "contentBlocking.lastRefresh") }
+        applyActiveLists()
     }
 
     private var shouldRefresh: Bool {
@@ -131,7 +165,7 @@ final class ContentBlocking {
             return true
         }
         guard let date = defaults.object(forKey: "contentBlocking.lastRefresh") as? Date else { return true }
-        return Date.now.timeIntervalSince(date) >= 60 * 60 * 24
+        return Date.now.timeIntervalSince(date) >= Self.refreshInterval
     }
 
     private func isUsable(_ feed: Feed) -> Bool {
@@ -209,12 +243,22 @@ final class ContentBlocking {
     }
 
     private func applyActiveLists() {
-        WebViewPool.shared.applyContentRuleLists(allActiveLists)
+        let lists = allActiveLists
+        activeRuleListCount = lists.count
+        lastRefresh = defaults.object(forKey: "contentBlocking.lastRefresh") as? Date
+        WebViewPool.shared.applyContentRuleLists(lists)
     }
 
+    /// The lists the user's switches leave standing. Element hiding lives in its own list per
+    /// feed, which is what makes it separable from the network rules at all.
     private var allActiveLists: [WKContentRuleList] {
-        Array(activeLists.values) + Array(extensionLists.values)
+        let enabled = activeLists.filter { key, _ in
+            Self.isCosmeticKey(key) ? hidesBlockedAdSpace : blocksAdsAndTrackers
+        }
+        return Array(enabled.values) + Array(extensionLists.values)
     }
+
+    private static func isCosmeticKey(_ key: String) -> Bool { key.hasSuffix(".cosmetic") }
 
     private func deactivateList(key: String) {
         guard let list = activeLists.removeValue(forKey: key) else { return }

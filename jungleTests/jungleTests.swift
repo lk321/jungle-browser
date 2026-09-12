@@ -1082,7 +1082,6 @@ final class JungleTests: XCTestCase {
         try? await WKWebsiteDataStore.remove(forIdentifier: profile.dataStoreID)
     }
 
-    @MainActor
     /// The two halves of an anti-adblock page: the detector that reports the blocker, and the
     /// wall it puts up afterwards. Neither knows about any particular site.
     @MainActor
@@ -1129,6 +1128,7 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(result, "true,true,true,true,true")
     }
 
+    @MainActor
     func testYouTubeAdPlacementsAreStrippedFromThePlayerResponse() async throws {
         let controller = WKUserContentController()
         controller.addUserScript(YouTubeAdBlocking.playerScript)
@@ -1357,6 +1357,42 @@ final class JungleTests: XCTestCase {
     /// An embedded video player that answers a click with a window to a throwaway ad domain is
     /// the popunder every streaming site ships, and no filter list reaches it: the frame is the
     /// content the user came for and the destination is new every time.
+    @MainActor
+    func testAdBlockingSwitchesDefaultToProtectedAndSurviveALaunch() throws {
+        let persistence = try BrowserPersistence(testingInMemory: true)
+
+        // Nothing chosen yet has to read as protected, or an existing install would come
+        // back with its blocker switched off.
+        let fresh = BrowserSettings(persistence: persistence)
+        XCTAssertEqual(fresh.adBlocking, AdBlockingOptions())
+
+        fresh.adBlocking.hidesBlockedAdSpace = false
+        fresh.adBlocking.skipsYouTubeAds = false
+
+        let reopened = BrowserSettings(persistence: persistence)
+        XCTAssertFalse(reopened.adBlocking.hidesBlockedAdSpace)
+        XCTAssertFalse(reopened.adBlocking.skipsYouTubeAds)
+        // The switches the user never touched stay on.
+        XCTAssertTrue(reopened.adBlocking.blocksAdsAndTrackers)
+        XCTAssertTrue(reopened.adBlocking.bypassesAdblockWalls)
+        XCTAssertTrue(reopened.adBlocking.blocksEmbeddedPlayerPopups)
+    }
+
+    @MainActor
+    func testTurningOffEmbeddedPlayerPopupBlockingGivesThePlayerItsWindowBack() throws {
+        let store = makeStore()
+        let tabID = try XCTUnwrap(store.selectedTabID)
+
+        XCTAssertFalse(store.allowsPopup(from: tabID, isFromEmbeddedOtherSiteFrame: true, isLinkActivated: true))
+
+        store.settings.adBlocking.blocksEmbeddedPlayerPopups = false
+
+        XCTAssertTrue(store.allowsPopup(from: tabID, isFromEmbeddedOtherSiteFrame: true, isLinkActivated: true))
+        // The burst limit is a separate switch and still applies to the page's own scripts.
+        XCTAssertTrue(store.allowsPopup(from: tabID, isFromEmbeddedOtherSiteFrame: false, isLinkActivated: false))
+        XCTAssertFalse(store.allowsPopup(from: tabID, isFromEmbeddedOtherSiteFrame: false, isLinkActivated: false))
+    }
+
     func testPopupsFromAnEmbeddedOtherSiteFrameNeverOpen() {
         // Scripted, and clicked as a link — these players put an anchor over the picture.
         for wasClickedAsLink in [false, true] {

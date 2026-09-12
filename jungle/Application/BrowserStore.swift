@@ -546,7 +546,7 @@ final class BrowserStore: ObservableObject {
 
     func allowsPopup(from sourceTabID: UUID, isFromEmbeddedOtherSiteFrame: Bool, isLinkActivated: Bool) -> Bool {
         guard Self.shouldAllowPopup(
-            isFromEmbeddedOtherSiteFrame: isFromEmbeddedOtherSiteFrame,
+            isFromEmbeddedOtherSiteFrame: isFromEmbeddedOtherSiteFrame && settings.adBlocking.blocksEmbeddedPlayerPopups,
             isLinkActivated: isLinkActivated,
             lastScriptedPopupAt: lastScriptedPopupDates[sourceTabID]
         ) else { return false }

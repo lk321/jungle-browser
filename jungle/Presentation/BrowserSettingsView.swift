@@ -7,6 +7,8 @@ struct BrowserSettingsView: View {
     @StateObject private var defaultBrowserController = DefaultBrowserController()
     @StateObject private var notificationController = BrowserNotificationController()
     @State private var selectedCategory: SettingsCategory = .general
+    @ObservedObject private var contentBlocking = ContentBlocking.shared
+    @State private var isCheckingForListUpdates = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -81,6 +83,8 @@ struct BrowserSettingsView: View {
             switch selectedCategory {
             case .general:
                 generalSettings
+            case .adBlocking:
+                adBlockingSettings
             case .workspace:
                 workspaceSettings
             case .system:
@@ -138,6 +142,95 @@ struct BrowserSettingsView: View {
             caption("⌘T opens YouTube directly. Your selected search engine still handles searches from the address bar.")
         } else {
             caption("⌘T opens the home page of your selected search engine.")
+        }
+    }
+
+    private var adBlockingSettings: some View {
+        Group {
+            settingsSection("Protection") {
+                adBlockingToggle(
+                    "Block ads and trackers",
+                    caption: "Ad and tracker requests never leave your Mac. Turning this off stops the filter lists entirely.",
+                    isOn: $settings.adBlocking.blocksAdsAndTrackers
+                )
+                Divider()
+                adBlockingToggle(
+                    "Hide the space a blocked ad leaves",
+                    caption: "Closes the empty frame around a blocked ad. This is the part most likely to take a piece of a page with it, so turn it off first if a site looks wrong.",
+                    isOn: $settings.adBlocking.hidesBlockedAdSpace
+                )
+                .disabled(!settings.adBlocking.blocksAdsAndTrackers)
+                Divider()
+                adBlockingToggle(
+                    "Block pop-ups from embedded players",
+                    caption: "A video player inside a page asks for a window on its own behalf, never yours. Pop-ups the page itself opens, such as a sign-in window, still work.",
+                    isOn: $settings.adBlocking.blocksEmbeddedPlayerPopups
+                )
+                Divider()
+                adBlockingToggle(
+                    "Get past \"disable your ad blocker\" walls",
+                    caption: "Answers the detectors these pages use and takes down the notice they put over the page. Applies to a tab the next time it loads.",
+                    isOn: $settings.adBlocking.bypassesAdblockWalls
+                )
+                Divider()
+                adBlockingToggle(
+                    "Skip ads inside YouTube videos",
+                    caption: "YouTube serves its video ads from the same address as the video, so no filter list can reach them.",
+                    isOn: $settings.adBlocking.skipsYouTubeAds
+                )
+            }
+
+            settingsSection("Filter lists") {
+                HStack(spacing: 10) {
+                    Image(systemName: settings.adBlocking.blocksAdsAndTrackers ? "checkmark.shield.fill" : "shield.slash")
+                        .foregroundStyle(settings.adBlocking.blocksAdsAndTrackers ? Color.green : Color.secondary)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(listStatusTitle)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                        caption(listStatusDetail)
+                    }
+                    Spacer(minLength: 0)
+                    Button(isCheckingForListUpdates ? "Checking…" : "Check now") {
+                        isCheckingForListUpdates = true
+                        Task {
+                            await ContentBlocking.shared.refreshNow()
+                            isCheckingForListUpdates = false
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isCheckingForListUpdates || contentBlocking.isRefreshing)
+                }
+                caption("EasyList and EasyPrivacy are rebuilt several times a day. Jungle checks every six hours and on launch, asking the server whether anything changed — an unchanged list costs one small request and no recompiling.")
+            }
+        }
+    }
+
+    private var listStatusTitle: String {
+        guard settings.adBlocking.blocksAdsAndTrackers else { return "Blocking is off" }
+        return contentBlocking.activeRuleListCount == 0 ? "Preparing filter lists…" : "Filter lists are active"
+    }
+
+    private var listStatusDetail: String {
+        guard let lastRefresh = contentBlocking.lastRefresh else {
+            return "EasyList and EasyPrivacy · not downloaded yet"
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return "EasyList and EasyPrivacy · updated \(formatter.localizedString(for: lastRefresh, relativeTo: .now))"
+    }
+
+    private func adBlockingToggle(_ title: String, caption text: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                caption(text)
+            }
+            Spacer(minLength: 8)
+            Toggle(title, isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
         }
     }
 
@@ -333,6 +426,7 @@ struct BrowserSettingsView: View {
 
 private enum SettingsCategory: String, CaseIterable, Identifiable {
     case general
+    case adBlocking
     case workspace
     case system
     case extensions
@@ -343,6 +437,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .general: "General"
+        case .adBlocking: "Ad blocking"
         case .workspace: "Workspace"
         case .system: "System"
         case .extensions: "Extensions"
@@ -353,6 +448,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general: "slider.horizontal.3"
+        case .adBlocking: "shield.lefthalf.filled"
         case .workspace: "rectangle.3.group"
         case .system: "macbook"
         case .extensions: "puzzlepiece.extension"
@@ -363,6 +459,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     var description: String {
         switch self {
         case .general: "Search, new tabs, and appearance."
+        case .adBlocking: "What Jungle blocks, and the lists it blocks from."
         case .workspace: "Keep inactive tabs from using memory."
         case .system: "Mac integration and website notifications."
         case .extensions: "Manage compatible declarative WebKit rules."

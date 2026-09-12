@@ -48,14 +48,7 @@ final class WebViewPool {
             contentWorld: .page,
             name: WebNotifications.handlerName
         )
-        configuration.userContentController.addUserScript(WebNotifications.userScript)
-        configuration.userContentController.addUserScript(Self.mediaScript)
-        configuration.userContentController.addUserScript(JungleWebView.contextMenuScript)
-        configuration.userContentController.addUserScript(DeveloperDiagnostics.userScript)
-        configuration.userContentController.addUserScript(LinkPrewarming.userScript)
-        configuration.userContentController.addUserScript(AntiAdblockDefusing.userScript)
-        configuration.userContentController.addUserScript(YouTubeAdBlocking.userScript)
-        configuration.userContentController.addUserScript(YouTubeAdBlocking.playerScript)
+        addUserScripts(to: configuration.userContentController)
         ContentBlocking.shared.install(on: configuration.userContentController)
 
         let webView = JungleWebView(frame: .zero, configuration: configuration)
@@ -78,6 +71,41 @@ final class WebViewPool {
         prepare(webView, isDark: isDark ?? systemAppearanceIsDark)
         webViews[tabID] = webView
         return webView
+    }
+
+    /// Which of the in-page defences are switched on. Scripts are installed per web view, so
+    /// a change here is re-applied to the views that already exist.
+    private var adBlocking = AdBlockingOptions()
+
+    func setAdBlockingOptions(_ options: AdBlockingOptions) {
+        guard adBlocking != options else { return }
+        adBlocking = options
+        webViews.values.forEach { webView in
+            let controller = webView.configuration.userContentController
+            controller.removeAllUserScripts()
+            addUserScripts(to: controller)
+        }
+    }
+
+    /// Every script a tab runs, in one place, because switching one off means putting the
+    /// rest back: WebKit only removes user scripts all at once.
+    ///
+    /// ponytail: a script already injected into a loaded page stays until that page goes
+    /// away, so a switch flipped mid-browse reaches a tab on its next load. Re-running the
+    /// open pages would mean reloading tabs out from under the user.
+    private func addUserScripts(to controller: WKUserContentController) {
+        controller.addUserScript(WebNotifications.userScript)
+        controller.addUserScript(Self.mediaScript)
+        controller.addUserScript(JungleWebView.contextMenuScript)
+        controller.addUserScript(DeveloperDiagnostics.userScript)
+        controller.addUserScript(LinkPrewarming.userScript)
+        if adBlocking.bypassesAdblockWalls {
+            controller.addUserScript(AntiAdblockDefusing.userScript)
+        }
+        if adBlocking.skipsYouTubeAds {
+            controller.addUserScript(YouTubeAdBlocking.userScript)
+            controller.addUserScript(YouTubeAdBlocking.playerScript)
+        }
     }
 
     private func prepare(_ webView: JungleWebView, isDark: Bool) {

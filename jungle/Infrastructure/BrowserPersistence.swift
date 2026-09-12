@@ -12,6 +12,13 @@ final class PersistedBrowserSettings {
     var sidebarWidth: Double?
     var activeProfileSlot: Int
     var selectedTabID: UUID?
+    /// Optional so an install that predates these switches reads as "never chosen" rather
+    /// than as "turned off".
+    var blocksAdsAndTrackers: Bool?
+    var hidesBlockedAdSpace: Bool?
+    var bypassesAdblockWalls: Bool?
+    var blocksEmbeddedPlayerPopups: Bool?
+    var skipsYouTubeAds: Bool?
 
     init(
         id: String = "current",
@@ -22,7 +29,12 @@ final class PersistedBrowserSettings {
         tabSleepInterval: TimeInterval = BrowserSettings.defaultTabSleepInterval,
         sidebarWidth: Double? = nil,
         activeProfileSlot: Int = 0,
-        selectedTabID: UUID? = nil
+        selectedTabID: UUID? = nil,
+        blocksAdsAndTrackers: Bool? = nil,
+        hidesBlockedAdSpace: Bool? = nil,
+        bypassesAdblockWalls: Bool? = nil,
+        blocksEmbeddedPlayerPopups: Bool? = nil,
+        skipsYouTubeAds: Bool? = nil
     ) {
         self.id = id
         self.searchEngine = searchEngine
@@ -33,6 +45,11 @@ final class PersistedBrowserSettings {
         self.sidebarWidth = sidebarWidth
         self.activeProfileSlot = activeProfileSlot
         self.selectedTabID = selectedTabID
+        self.blocksAdsAndTrackers = blocksAdsAndTrackers
+        self.hidesBlockedAdSpace = hidesBlockedAdSpace
+        self.bypassesAdblockWalls = bypassesAdblockWalls
+        self.blocksEmbeddedPlayerPopups = blocksEmbeddedPlayerPopups
+        self.skipsYouTubeAds = skipsYouTubeAds
     }
 }
 
@@ -238,7 +255,8 @@ final class BrowserPersistence {
         customNewTabAddress: String,
         appearance: BrowserAppearance,
         tabSleepInterval: TimeInterval,
-        sidebarWidth: CGFloat
+        sidebarWidth: CGFloat,
+        adBlocking: AdBlockingOptions
     ) {
         let settings = loadSettings()
         settings.searchEngine = searchEngine.rawValue
@@ -247,6 +265,11 @@ final class BrowserPersistence {
         settings.appearance = appearance.rawValue
         settings.tabSleepInterval = tabSleepInterval
         settings.sidebarWidth = Double(sidebarWidth)
+        settings.blocksAdsAndTrackers = adBlocking.blocksAdsAndTrackers
+        settings.hidesBlockedAdSpace = adBlocking.hidesBlockedAdSpace
+        settings.bypassesAdblockWalls = adBlocking.bypassesAdblockWalls
+        settings.blocksEmbeddedPlayerPopups = adBlocking.blocksEmbeddedPlayerPopups
+        settings.skipsYouTubeAds = adBlocking.skipsYouTubeAds
         save()
     }
 
