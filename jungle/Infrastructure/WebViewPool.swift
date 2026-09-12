@@ -54,12 +54,32 @@ final class WebViewPool {
         ContentBlocking.shared.install(on: configuration.userContentController)
 
         let webView = JungleWebView(frame: .zero, configuration: configuration)
-        applyContentBackground(isDark: isDark ?? systemAppearanceIsDark, to: webView)
+        prepare(webView, isDark: isDark ?? systemAppearanceIsDark)
+        webViews[tab.id] = webView
+        return webView
+    }
+
+    /// The web view a page asked for with `window.open` or a `target="_blank"` link. WebKit
+    /// requires the configuration it handed over to be the one the new view is built from, and
+    /// it navigates the view itself, so the tab this belongs to must never load its address a
+    /// second time.
+    ///
+    /// ponytail: the configuration WebKit copies from the opener carries the opener's content
+    /// controller, so audio and developer metrics a popup reports are filed under the tab that
+    /// opened it. Rebinding those handlers would rebind the opener's too. Split them when a
+    /// popup that keeps playing something actually needs its own speaker.
+    func adoptPopup(configuration: WKWebViewConfiguration, for tabID: UUID, isDark: Bool? = nil) -> WKWebView {
+        let webView = JungleWebView(frame: .zero, configuration: configuration)
+        prepare(webView, isDark: isDark ?? systemAppearanceIsDark)
+        webViews[tabID] = webView
+        return webView
+    }
+
+    private func prepare(_ webView: JungleWebView, isDark: Bool) {
+        applyContentBackground(isDark: isDark, to: webView)
         webView.customUserAgent = Self.safariUserAgent
         webView.allowsBackForwardNavigationGestures = true
         webView.isInspectable = true
-        webViews[tab.id] = webView
-        return webView
     }
 
     /// The view a tab keeps for as long as it lives. WebKit docks the Web Inspector beside

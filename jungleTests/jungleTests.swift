@@ -1354,6 +1354,86 @@ final class JungleTests: XCTestCase {
 
         XCTAssertEqual(result, "true,true,true,true")
     }
+
+    /// A page that opens a window has to be handed the window it asked for. Opening a tab of
+    /// our own and answering `nil` reads to the page as a blocked popup, and a page that hears
+    /// that runs its fallback — which is why one click on a Jira attachment downloaded the file
+    /// twice and left a tab that opened and closed on its own.
+    @MainActor
+    func testWindowOpenIsAnsweredWithTheWindowThePageAskedFor() async throws {
+        let store = makeStore()
+        let coordinator = BrowserWebView.Coordinator(store: store)
+        let tabID = try XCTUnwrap(store.selectedTabID)
+        let tab = try XCTUnwrap(store.tabs.first(where: { $0.id == tabID }))
+        let profile = try XCTUnwrap(store.profiles.first(where: { $0.id == tab.profileID }))
+        let webView = WebViewPool.shared.webView(for: tab, profile: profile)
+        coordinator.attach(to: webView, tabID: tabID)
+
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<p>attachment</p>",
+            baseURL: try XCTUnwrap(URL(string: "https://jira.example.com/browse/X-1"))
+        )
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        webView.navigationDelegate = coordinator
+
+        // Port 1 refuses at once, so the popup WebKit navigates never leaves this machine.
+        let opened = try await webView.evaluateJavaScript(
+            "String(window.open('https://127.0.0.1:1/attachment/1', '_blank'))",
+            in: nil,
+            contentWorld: .page
+        ) as? String
+
+        XCTAssertEqual(opened, "[object Window]")
+        XCTAssertEqual(store.tabs.count, 2, "One window asked for is one tab opened")
+    }
+
+    /// WebKit loads the popup it was handed. The tab it belongs to must not request the same
+    /// address again: a second request for an attachment is a second download of the file.
+    @MainActor
+    func testPopupTabDoesNotRequestItsAddressASecondTime() throws {
+        let store = makeStore()
+        let sourceTabID = try XCTUnwrap(store.selectedTabID)
+        let address = try XCTUnwrap(URL(string: "https://127.0.0.1:1/attachment/1"))
+        let popupTabID = try XCTUnwrap(store.openPopupTab(from: sourceTabID, address: address))
+        XCTAssertEqual(store.selectedTabID, popupTabID)
+
+        store.loadSelectedTabIfNeeded()
+
+        let popupTab = try XCTUnwrap(store.tabs.first(where: { $0.id == popupTabID }))
+        let profile = try XCTUnwrap(store.profiles.first(where: { $0.id == popupTab.profileID }))
+        let webView = WebViewPool.shared.webView(for: popupTab, profile: profile)
+        XCTAssertFalse(webView.isLoading)
+        XCTAssertNil(webView.url)
+    }
+
+    /// A download that arrives through a redirect must not be requested twice. Atlassian hands
+    /// a Jira attachment over as a redirect to a signed media address, the web view moves to
+    /// that address, and the response turns into a download without ever committing a document.
+    /// Recording only the address originally asked for left the tab looking unloaded, so the
+    /// next layout pass fetched the file again and every attachment was saved twice.
+    @MainActor
+    func testATabRedirectedIntoADownloadIsNotRequestedAgain() throws {
+        let store = makeStore()
+        let requested = try XCTUnwrap(URL(string: "https://example.test/attachment/content/1"))
+        let redirected = try XCTUnwrap(URL(string: "https://cdn.example.test/binary?token=abc"))
+        let sourceTabID = try XCTUnwrap(store.selectedTabID)
+        let tabID = try XCTUnwrap(store.openPopupTab(from: sourceTabID, address: requested))
+
+        // WebKit follows the redirect and publishes the address it landed on.
+        store.didCommitNavigation(for: tabID, url: redirected)
+        XCTAssertEqual(store.tabs.first(where: { $0.id == tabID })?.address, redirected)
+
+        // The response became a download, so the web view still holds no document.
+        store.loadSelectedTabIfNeeded()
+
+        let tab = try XCTUnwrap(store.tabs.first(where: { $0.id == tabID }))
+        let profile = try XCTUnwrap(store.profiles.first(where: { $0.id == tab.profileID }))
+        let webView = WebViewPool.shared.webView(for: tab, profile: profile)
+        XCTAssertFalse(webView.isLoading, "The redirected address was already requested once")
+        XCTAssertNil(webView.url)
+    }
 }
 
 @MainActor

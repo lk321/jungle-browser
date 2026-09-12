@@ -27,7 +27,10 @@ struct BrowserWorkspaceView: View {
                         .frame(width: sidebarStep.width)
                         .background(SidebarSurface())
                         .overlay(alignment: .trailing) { SidebarResizeHandle(store: store) }
-                        .transition(.move(edge: .leading).combined(with: .opacity))
+                        // Sliding only. A behind-window material is drawn by the window server,
+                        // which cannot blend it: the moment SwiftUI faded the sidebar, the glass
+                        // dropped out whole and the desktop showed through the hole it left.
+                        .transition(.move(edge: .leading))
                 }
 
                 browserContent

@@ -505,6 +505,25 @@ final class BrowserStore: ObservableObject {
         close(tabID)
     }
 
+    /// The tab a page opened with `window.open` or a `target="_blank"` link. WebKit navigates
+    /// the web view it was handed, so the address is recorded as already requested: loading it
+    /// again here is a second request for the same file, which is a second download whenever
+    /// that file is an attachment.
+    func openPopupTab(from sourceTabID: UUID, address: URL) -> UUID? {
+        guard BrowserAddress.isWebURL(address),
+              let sourceTab = tabs.first(where: { $0.id == sourceTabID })
+        else { return nil }
+        let tab = BrowserTab(
+            profileID: sourceTab.profileID,
+            address: address,
+            title: address.host ?? address.absoluteString
+        )
+        tabs.append(tab)
+        lastRequestedAddresses[tab.id] = address
+        select(tab.id)
+        return tab.id
+    }
+
     func openLinkInNewTab(_ address: URL, from sourceTabID: UUID) {
         guard BrowserAddress.isWebURL(address),
               let sourceTab = tabs.first(where: { $0.id == sourceTabID })
@@ -848,6 +867,11 @@ final class BrowserStore: ObservableObject {
     func didCommitNavigation(for tabID: UUID, url: URL?) {
         guard let url else { return }
         update(tabID) { $0.address = url }
+        // An address the web view moved to on its own is an address it has already requested.
+        // Leaving the pre-redirect one recorded made a tab whose response turned into a
+        // download look like it had never loaded, and the next layout pass asked for the file
+        // a second time: one click on a Jira attachment saved it twice.
+        lastRequestedAddresses[tabID] = url
         // A committed document covers whatever failed before it, including the same-document
         // moves that never start a navigation. Otherwise the error page stays over a live page.
         navigationFailures.removeValue(forKey: tabID)

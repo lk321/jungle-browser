@@ -214,13 +214,15 @@ struct BrowserWebView: NSViewRepresentable {
             store.openLinkInNewTab(destination, from: tabID)
         }
 
-        /// A `target="_blank"` link or a `window.open` used to do nothing at all: WebKit asks
-        /// its UI delegate for a window to put the page in, and there was no UI delegate. Every
-        /// one of those now lands in a tab, which is what a command-click already did.
+        /// A `target="_blank"` link or a `window.open` lands in a tab carrying the web view
+        /// WebKit asked for. Opening a tab of our own and answering `nil` instead told the page
+        /// its popup had been blocked, and a page that hears that runs its fallback: the file
+        /// a Jira attachment button opens was fetched once by the tab and once more by the
+        /// fallback, which is what downloaded everything twice.
         ///
-        /// ponytail: a popup opened at `about:blank` for the page to write into is dropped,
-        /// because serving one needs a second web view built from this configuration. Add it
-        /// if a site that matters actually needs it.
+        /// ponytail: a popup opened at `about:blank` for the page to write into is still
+        /// dropped. Serving one means a tab with no address to show; add it if a site that
+        /// matters actually needs it.
         func webView(
             _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,
@@ -230,9 +232,12 @@ struct BrowserWebView: NSViewRepresentable {
             guard let destination = BrowserStore.newWindowDestination(
                 shouldPerformDownload: navigationAction.shouldPerformDownload,
                 requestURL: navigationAction.request.url
-            ), let tabID = tabID(of: webView) else { return nil }
-            store.openLinkInNewTab(destination, from: tabID)
-            return nil
+            ), let tabID = tabID(of: webView),
+                  let popupTabID = store.openPopupTab(from: tabID, address: destination)
+            else { return nil }
+            let popup = WebViewPool.shared.adoptPopup(configuration: configuration, for: popupTabID)
+            attach(to: popup, tabID: popupTabID)
+            return popup
         }
 
         func webView(
@@ -272,8 +277,10 @@ struct BrowserWebView: NSViewRepresentable {
             let tabID = tabID(of: webView)
             configure(download: download, sourceAddress: navigationResponse.response.url ?? webView.url, tabID: tabID)
             // A tab a link opened only to download something never receives a document: WebKit
-            // hands the response to the downloader and leaves the tab blank forever.
-            guard let tabID, webView.url == nil, !webView.canGoBack else { return }
+            // hands the response to the downloader and leaves the tab blank forever. The
+            // back-forward list is what says so — `url` still holds the provisional address
+            // while the response is being handed over, which left the blank tab on screen.
+            guard let tabID, webView.backForwardList.currentItem == nil, !webView.canGoBack else { return }
             store.closeTabOpenedForDownload(tabID)
         }
 
