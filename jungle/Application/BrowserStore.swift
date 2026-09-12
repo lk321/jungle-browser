@@ -773,9 +773,11 @@ final class BrowserStore: ObservableObject {
 
     func copySelectedTabAddress() {
         guard let address = selectedTab?.address, BrowserAddress.isWebURL(address) else { return }
+        // What leaves the browser is the shareable link, not the one the campaign wrote.
+        let shareable = BrowserAddress.withoutTrackingParameters(address)
         NSPasteboard.general.clearContents()
-        guard NSPasteboard.general.setString(address.absoluteString, forType: .string) else { return }
-        copiedTabAddress = address
+        guard NSPasteboard.general.setString(shareable.absoluteString, forType: .string) else { return }
+        copiedTabAddress = shareable
         copiedAddressFeedbackTask?.cancel()
         copiedAddressFeedbackTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))

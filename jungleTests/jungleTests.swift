@@ -1265,6 +1265,95 @@ final class JungleTests: XCTestCase {
 
         XCTAssertEqual(WindowHeaderDoubleClickAction.systemPreference(in: defaults), .ignore)
     }
+
+    /// The copy shortcut has to hand over a link that still opens the same page. Campaign
+    /// noise goes, and every parameter the server reads to pick what it renders stays.
+    func testCopiedAddressDropsTrackersAndKeepsParametersThatSelectThePage() {
+        func clean(_ address: String) -> String {
+            guard let url = URL(string: address) else { return "invalid" }
+            return BrowserAddress.withoutTrackingParameters(url).absoluteString
+        }
+
+        // YouTube: the share identifier goes, the video and its timestamp stay.
+        XCTAssertEqual(
+            clean("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1&t=42&si=Ab3d"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1&t=42"
+        )
+        XCTAssertEqual(clean("https://youtu.be/dQw4w9WgXcQ?si=Ab3d&t=10"), "https://youtu.be/dQw4w9WgXcQ?t=10")
+
+        // Amazon: the referrer path segment and the click attribution go, the variant stays.
+        XCTAssertEqual(
+            clean("https://www.amazon.com.mx/dp/B08N5WRWNW/ref=sr_1_3?crid=X1&qid=1700000000&psc=1&pd_rd_w=aB3"),
+            "https://www.amazon.com.mx/dp/B08N5WRWNW?psc=1"
+        )
+
+        // A query that is nothing but trackers leaves no dangling question mark.
+        XCTAssertEqual(clean("https://example.com/page?utm_source=news&fbclid=abc"), "https://example.com/page")
+
+        // Mercado Libre hides its trackers in the fragment.
+        XCTAssertEqual(
+            clean("https://articulo.mercadolibre.com.mx/MLM-123-item#polycard_client=search&wid=MLM1&tracking_id=99"),
+            "https://articulo.mercadolibre.com.mx/MLM-123-item"
+        )
+
+        // Fragments that are not query-shaped, and sites with no rule, come back untouched.
+        XCTAssertEqual(clean("https://example.com/doc#section-2"), "https://example.com/doc#section-2")
+        XCTAssertEqual(clean("https://example.com/a?si=keep&ref=keep&t=1"), "https://example.com/a?si=keep&ref=keep&t=1")
+        XCTAssertEqual(clean("https://example.com/search?q=hello%20world&page=2"), "https://example.com/search?q=hello%20world&page=2")
+
+        // A lookalike host must not inherit Amazon's rules.
+        XCTAssertEqual(
+            clean("https://amazon.com.attacker.example/dp/X/ref=sr_1_3?tag=abc"),
+            "https://amazon.com.attacker.example/dp/X/ref=sr_1_3?tag=abc"
+        )
+    }
+
+
+    /// The tab speaker only ever silences. Writing its unmuted state back on every
+    /// `volumechange` undid the player's own mute button, so pressing mute inside a
+    /// Facebook reel or the YouTube player left the sound playing.
+    @MainActor
+    func testPageMuteSurvivesTheTabSpeakerInsideWebKit() async throws {
+        let controller = WKUserContentController()
+        controller.addUserScript(WebViewPool.mediaScript)
+        controller.add(DiscardedMessages(), name: "jungleMedia")
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = controller
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<video id=\"page-muted\"></video><video id=\"tab-muted\"></video>",
+            baseURL: try XCTUnwrap(URL(string: "https://www.facebook.com/reel/1"))
+        )
+
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        let result = try await webView.evaluateJavaScript(
+            """
+            (function () {
+                const page = document.getElementById('page-muted');
+                const tab = document.getElementById('tab-muted');
+
+                // The player's own speaker button, and the event WebKit raises for it.
+                page.muted = true;
+                page.dispatchEvent(new Event('volumechange', { bubbles: true }));
+                const survivedTheEvent = page.muted;
+
+                __jungleMedia.setMuted(true);
+                const silencedEverything = page.muted && tab.muted;
+
+                // Unmuting the tab hands the sound back to what the tab silenced, and
+                // leaves the video the page muted exactly as the page left it.
+                __jungleMedia.setMuted(false);
+                return [survivedTheEvent, silencedEverything, page.muted, !tab.muted].join(',');
+            })();
+            """,
+            in: nil,
+            contentWorld: .defaultClient
+        ) as? String
+
+        XCTAssertEqual(result, "true,true,true,true")
+    }
 }
 
 @MainActor
@@ -1274,4 +1363,8 @@ private final class NavigationCompletion: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         finished.fulfill()
     }
+}
+
+private final class DiscardedMessages: NSObject, WKScriptMessageHandler {
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {}
 }

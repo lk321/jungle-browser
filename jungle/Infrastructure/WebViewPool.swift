@@ -292,10 +292,25 @@ final class WebViewPool {
                 return !media.paused && !media.ended && media.volume > 0;
             }
 
+            // The tab mute only ever silences. A page that mutes itself, or a speaker button
+            // the user presses inside the player, has to survive: writing `muted` in both
+            // directions here undid every in-page mute on the next `volumechange`.
+            const mutedByTab = new WeakSet();
+
             function applyMuted() {
                 // Only write when it differs, or the volumechange listener below re-enters.
                 Array.prototype.forEach.call(mediaElements(), function (media) {
-                    if (media.muted !== muted) { media.muted = muted; }
+                    if (muted) {
+                        if (media.muted) { return; }
+                        mutedByTab.add(media);
+                        media.muted = true;
+                        return;
+                    }
+                    // Give the sound back only to what this tab silenced, never to a video
+                    // the page or the user muted on its own.
+                    if (!mutedByTab.has(media)) { return; }
+                    mutedByTab.delete(media);
+                    media.muted = false;
                 });
             }
 
