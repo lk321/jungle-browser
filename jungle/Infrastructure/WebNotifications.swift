@@ -7,10 +7,10 @@ import WebKit
 /// Notification Center. Clicking a banner brings the tab that sent it to the front.
 ///
 /// ponytail: WebKit's own notification plumbing is private API with no public presenter, so
-/// the API is served from a page-world script instead. That covers in-page
-/// `new Notification(...)`, which is what a call, a chat or a mail tab uses while it is open.
-/// Notifications posted from a service worker (`registration.showNotification`) are not
-/// covered; add them when a site that matters needs to notify with its tab closed.
+/// the API is served from a page-world script instead. It covers `new Notification(...)`,
+/// `registration.showNotification(...)` called from the page, and the permission as read
+/// through `navigator.permissions` — Google Chat and Calendar use the last two. A service
+/// worker posting with every tab of its site closed is still not covered.
 @MainActor
 final class WebNotifications: NSObject {
     static let shared = WebNotifications()
@@ -28,6 +28,19 @@ final class WebNotifications: NSObject {
     /// the front app, which is exactly when a call or chat notification matters.
     static func install() {
         UNUserNotificationCenter.current().delegate = shared
+        // A site allowed before macOS was ever asked (or in a build macOS never registered)
+        // would post into nothing, and the site itself never asks again.
+        if SitePermissions.decisions(for: .notifications).values.contains(true) {
+            Task { await ensureAuthorized() }
+        }
+    }
+
+    /// Asks macOS once, the first time Jungle has something to show. Without it every banner
+    /// is dropped silently: Jungle is not even listed in System Settings › Notifications.
+    private static func ensureAuthorized() async {
+        let center = UNUserNotificationCenter.current()
+        guard await center.notificationSettings().authorizationStatus == .notDetermined else { return }
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
     }
 
     // MARK: Page messages
@@ -44,7 +57,7 @@ final class WebNotifications: NSObject {
 
         switch type {
         case "requestPermission":
-            Task { await requestPermission(origin: origin, in: webView) }
+            Task { await requestPermission(origin: origin, in: webView, frame: message.frameInfo) }
         case "show":
             guard let scriptID = body["id"] as? String else { return }
             show(
@@ -63,30 +76,18 @@ final class WebNotifications: NSObject {
         }
     }
 
-    /// Tells a freshly committed document what its origin already answered, so a site that was
-    /// allowed once does not have to ask on every load.
-    ///
-    /// ponytail: sent right after the navigation commits rather than at document start, which
-    /// no public API can seed. A page that reads `Notification.permission` in its very first
-    /// inline script can still see `default` and ask again.
-    func seedPermission(in webView: WKWebView) {
-        guard let origin = SitePermissions.describe(webView.url),
-              let decision = SitePermissions.decision(for: origin, kinds: [.notifications])
-        else { return }
-        report(decision ? "granted" : "denied", to: webView, resolvesRequest: false)
-    }
-
-    private func requestPermission(origin: String, in webView: WKWebView) async {
+    private func requestPermission(origin: String, in webView: WKWebView, frame: WKFrameInfo) async {
+        let isNewAnswer = SitePermissions.decision(for: origin, kinds: [.notifications]) == nil
         let allowed = await SitePermissions.request([.notifications], origin: origin, in: webView.window)
-        if allowed { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
-        report(allowed ? "granted" : "denied", to: webView, resolvesRequest: true)
-    }
-
-    private func report(_ permission: String, to webView: WKWebView, resolvesRequest: Bool) {
-        let call = resolvesRequest ? "resolvePermission" : "setPermission"
+        if allowed { await Self.ensureAuthorized() }
+        // The answer is baked into the script every document starts with, so tabs pick it up
+        // on their next load without asking again.
+        if isNewAnswer { WebViewPool.shared.reinstallUserScripts() }
+        // Answered in the frame that asked: a chat embedded from another origin asks from
+        // its own iframe, and an answer sent to the main frame never reached it.
         webView.evaluateJavaScript(
-            "window.__jungleNotifications && window.__jungleNotifications.\(call)('\(permission)')",
-            in: nil,
+            "window.__jungleNotifications && window.__jungleNotifications.resolvePermission('\(allowed ? "granted" : "denied")')",
+            in: frame,
             in: .page
         ) { _ in }
     }
@@ -101,9 +102,11 @@ final class WebNotifications: NSObject {
         content.sound = .default
         let identifier = "\(tabID.uuidString)|\(scriptID)"
         posted[identifier] = Posted(webView: webView, scriptID: scriptID, tabID: tabID)
-        UNUserNotificationCenter.current().add(
-            UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        )
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        Task {
+            await Self.ensureAuthorized()
+            try? await UNUserNotificationCenter.current().add(request)
+        }
     }
 
     private func close(scriptID: String, tabID: UUID) {
@@ -114,8 +117,23 @@ final class WebNotifications: NSObject {
         center.removePendingNotificationRequests(withIdentifiers: [identifier])
     }
 
-    static let userScript = WKUserScript(
-        source: """
+    /// The answers are written into the script, so every frame knows its origin's permission
+    /// before the page's own first line runs. Seeding it after the commit came too late: Chat
+    /// and Calendar had already read `default` and never posted a thing.
+    static func userScript() -> WKUserScript {
+        let decisions = SitePermissions.decisions(for: .notifications)
+            .mapValues { $0 ? "granted" : "denied" }
+        let json = (try? JSONSerialization.data(withJSONObject: decisions))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return WKUserScript(
+            source: scriptSource.replacingOccurrences(of: "__JUNGLE_DECISIONS__", with: json),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false,
+            in: .page
+        )
+    }
+
+    private static let scriptSource = """
         (function () {
             if (window.__jungleNotifications) { return; }
             const handler = window.webkit
@@ -123,7 +141,7 @@ final class WebNotifications: NSObject {
                 && window.webkit.messageHandlers.\(handlerName);
             if (!handler) { return; }
 
-            let permission = 'default';
+            let permission = (__JUNGLE_DECISIONS__)[location.origin] || 'default';
             let nextID = 1;
             const live = new Map();
             const waiting = [];
@@ -180,7 +198,6 @@ final class WebNotifications: NSObject {
             }
 
             window.__jungleNotifications = {
-                setPermission: function (value) { permission = value; },
                 resolvePermission: function (value) {
                     permission = value;
                     waiting.splice(0).forEach(function (resolve) { resolve(value); });
@@ -198,12 +215,36 @@ final class WebNotifications: NSObject {
                 configurable: true,
                 writable: true
             });
+
+            // Sites check this before they post; WebKit's own answer knows nothing of ours.
+            if (navigator.permissions && typeof navigator.permissions.query === 'function') {
+                const query = navigator.permissions.query.bind(navigator.permissions);
+                navigator.permissions.query = function (descriptor) {
+                    if (!descriptor || descriptor.name !== 'notifications') { return query(descriptor); }
+                    const status = new EventTarget();
+                    status.name = 'notifications';
+                    status.state = permission === 'default' ? 'prompt' : permission;
+                    status.onchange = null;
+                    return Promise.resolve(status);
+                };
+            }
+
+            // A page with a service worker posts through its registration rather than the
+            // constructor. Called from the page, it can go through the same path.
+            if (window.ServiceWorkerRegistration) {
+                ServiceWorkerRegistration.prototype.showNotification = function (title, options) {
+                    if (permission !== 'granted') {
+                        return Promise.reject(new TypeError('No notification permission has been granted for this origin.'));
+                    }
+                    new JungleNotification(title, options);
+                    return Promise.resolve();
+                };
+                ServiceWorkerRegistration.prototype.getNotifications = function () {
+                    return Promise.resolve([]);
+                };
+            }
         })();
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: false,
-        in: .page
-    )
+        """
 }
 
 extension WebNotifications: UNUserNotificationCenterDelegate {

@@ -86,6 +86,33 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(candidates.map(\.id), [idle.id])
     }
 
+    /// Idle time has to be measured from when a tab stopped being selected, not from when it
+    /// was last selected. A tab read for a long while and then left moments ago must not read
+    /// as idle under a full 15-minute interval — that was the "tabs sleep in under a minute"
+    /// bug: only the arriving tab got a fresh timestamp, so the one being left kept whatever
+    /// timestamp it had from being selected long ago.
+    @MainActor
+    func testLeavingATabStampsItsOwnLastActivatedAtSoItIsNotImmediatelyIdle() throws {
+        let persistence = try BrowserPersistence(testingInMemory: true)
+        let profiles = persistence.loadProfiles()
+        let profileID = profiles[0].id
+        let longAgo = Date.now.addingTimeInterval(-3600)
+        let readTab = BrowserTab(profileID: profileID, address: BrowserAddress.home, title: "Read a while ago", lastActivatedAt: longAgo)
+        let otherTab = BrowserTab(profileID: profileID, address: BrowserAddress.home, title: "Other tab", lastActivatedAt: longAgo)
+        persistence.saveWorkspace(tabs: [readTab, otherTab], profiles: profiles, activeProfileID: profileID, selectedTabID: readTab.id)
+
+        let store = BrowserStore(persistence: persistence)
+        XCTAssertEqual(store.selectedTabID, readTab.id)
+
+        // Switching away from `readTab` is the "left just now" moment.
+        store.select(otherTab.id)
+
+        let cutoff = Date.now.addingTimeInterval(-900)
+        let idle = BrowserStore.idleTabs(in: store.tabs, cutoff: cutoff, selectedTabID: store.selectedTabID)
+
+        XCTAssertFalse(idle.contains(where: { $0.id == readTab.id }))
+    }
+
     /// The zoom ladder: both ends clamp, and stepping out and back in lands on exactly 1.0
     /// rather than on a drifted neighbour that would leave the badge reading 99%.
     @MainActor
@@ -292,10 +319,85 @@ final class JungleTests: XCTestCase {
     func testMediaScriptRequiresPlaybackBeforeEnteringPictureInPicture() {
         let source = WebViewPool.mediaScript.source
 
-        XCTAssertTrue(source.contains("activeVideo.paused"))
+        XCTAssertTrue(source.contains("isPlaying(activeVideo)"))
         XCTAssertFalse(source.contains("playingVideo() || document.querySelector('video')"))
-        XCTAssertTrue(source.contains("isPictureInPictureActive"))
-        XCTAssertTrue(source.contains("webkitpresentationmodechanged"), "Tracking is event driven, not polled")
+        XCTAssertFalse(source.contains("pictureInPictureDidChange"), "WebKit's delegate owns the floating window's state")
+    }
+
+    /// Anime and video hosts nest their player two or three cross-origin frames deep, where a
+    /// main-frame script never sees it. Every frame reports the video it plays, once WebKit
+    /// can present it, and keeps sound and the tab mute to the main frame.
+    @MainActor
+    func testMediaScriptReachesPlayersInEmbeddedFrames() {
+        let script = WebViewPool.mediaScript
+        let source = script.source
+
+        XCTAssertFalse(script.isForMainFrameOnly)
+        XCTAssertTrue(source.contains("addEventListener('playing'"), "`play` fires before WebKit can present the video")
+        XCTAssertTrue(source.contains("videoDidPlay"))
+        XCTAssertTrue(source.contains("if (!isTopFrame)"), "Only the main frame reports sound and applies the mute")
+        XCTAssertTrue(source.contains("shadowRoot"), "Players inside shadow roots are searched too")
+        XCTAssertTrue(source.contains("disablePictureInPicture = false"))
+    }
+
+    /// Find counts and moves through WebKit's own `NSTextFinder` document calls. A WebKit that
+    /// dropped one falls back to the uncounted public search; this says so before a user does.
+    @MainActor
+    func testFindInPageUsesWebKitsCountedSearch() {
+        XCTAssertTrue(PageFinder.canCount(in: WKWebView(frame: .zero)))
+    }
+
+    /// A search starts where the reader is, never back at the top of the page.
+    func testFindStartsAtTheFirstMatchFromWhereTheReaderIs() {
+        let origins = [CGPoint(x: 10, y: 8), CGPoint(x: 90, y: 8), CGPoint(x: 10, y: 600), CGPoint(x: 90, y: 600)]
+
+        XCTAssertEqual(FindInPage.firstIndex(in: origins, from: .zero), 0)
+        XCTAssertEqual(FindInPage.firstIndex(in: origins, from: CGPoint(x: 0, y: 300)), 2, "First match below the top of the screen")
+        XCTAssertEqual(FindInPage.firstIndex(in: origins, from: CGPoint(x: 90, y: 8)), 1, "Typing keeps the match already shown")
+        XCTAssertEqual(FindInPage.firstIndex(in: origins, from: CGPoint(x: 0, y: 900)), 0, "Past the last match it wraps")
+    }
+
+    /// `_isPictureInPictureActive` reads false for a window opened from an embedded player, so
+    /// the delegate's answer is what keeps the tab's view in the window.
+    @MainActor
+    func testPictureInPictureStateFollowsTheDelegateForEmbeddedPlayers() throws {
+        let store = makeStore()
+        let tab = try XCTUnwrap(store.selectedTab)
+        let profile = try XCTUnwrap(store.profiles.first(where: { $0.id == tab.profileID }))
+        _ = WebViewPool.shared.webView(for: tab, profile: profile)
+        defer { WebViewPool.shared.discard(tab.id) }
+
+        XCTAssertFalse(WebViewPool.shared.isPictureInPictureActive(tab.id))
+        WebViewPool.shared.pictureInPictureDidChange(isActive: true, tabID: tab.id)
+        XCTAssertTrue(WebViewPool.shared.isPictureInPictureActive(tab.id))
+        WebViewPool.shared.pictureInPictureDidChange(isActive: false, tabID: tab.id)
+        XCTAssertFalse(WebViewPool.shared.isPictureInPictureActive(tab.id))
+
+        WebViewPool.shared.pictureInPictureDidChange(isActive: true, tabID: tab.id)
+        WebViewPool.shared.discard(tab.id)
+        XCTAssertFalse(WebViewPool.shared.isPictureInPictureActive(tab.id), "A discarded tab holds no window")
+    }
+
+    /// The page script never sees a video inside an embedded frame or a shadow root, so the
+    /// floating window is tracked through WebKit's own delegate call. A renamed selector, or a
+    /// WebKit that dropped it, fails here instead of silently hiding tabs that own a window.
+    @MainActor
+    func testPictureInPictureStateComesFromWebKitDelegate() throws {
+        let selector = NSSelectorFromString("_webView:hasVideoInPictureInPictureDidChange:")
+        XCTAssertTrue(BrowserWebView.Coordinator.instancesRespond(to: selector))
+        let delegateProtocol = try XCTUnwrap(objc_getProtocol("WKUIDelegatePrivate"))
+        XCTAssertNotNil(protocol_getMethodDescription(delegateProtocol, selector, false, true).name)
+        let webView = WKWebView(frame: .zero)
+        ["_isPictureInPictureActive", "_canTogglePictureInPicture", "_togglePictureInPicture"].forEach {
+            XCTAssertTrue(webView.responds(to: NSSelectorFromString($0)), $0)
+        }
+    }
+
+    /// The sandbox grants `com.apple.PIPAgent` only to a process that already has PIP.framework
+    /// loaded; without it every floating window stalls before it appears.
+    func testPictureInPictureFrameworkIsLinked() {
+        XCTAssertTrue(WebViewPool.supportsPictureInPicture)
+        XCTAssertNotNil(dlopen("/System/Library/PrivateFrameworks/PIP.framework/Versions/A/PIP", RTLD_NOLOAD))
     }
 
     @MainActor
@@ -404,6 +506,18 @@ final class JungleTests: XCTestCase {
         store.didTerminateWebContent(for: tabID)
 
         XCTAssertFalse(store.selectedTabInitialContentIsReady)
+    }
+
+    /// An "Open App" button sends an address only another app can load. Everything WebKit
+    /// loads itself, and the app's own new-tab page, stays in the browser.
+    func testRecognizesAddressesThatBelongToAnotherApp() throws {
+        for address in ["claude://login/callback?code=1", "zoommtg://zoom.us/join", "mailto:hello@example.com", "tel:+15551234567", "itms-apps://apps.apple.com/app/id1", "VSCODE://file/tmp"] {
+            XCTAssertTrue(BrowserAddress.opensInAnotherApp(try XCTUnwrap(URL(string: address))), address)
+        }
+        for address in ["https://example.com", "http://example.com", "about:blank", "blob:https://example.com/1", "data:text/plain,hi", "javascript:void(0)", "wss://example.com/socket", "jungle://new-tab", "relative/path"] {
+            XCTAssertFalse(BrowserAddress.opensInAnotherApp(try XCTUnwrap(URL(string: address))), address)
+        }
+        XCTAssertFalse(BrowserAddress.opensInAnotherApp(URL(fileURLWithPath: "/tmp/example")))
     }
 
     func testRecognizesHTTPAndHTTPSExternalURLs() {
@@ -1596,6 +1710,83 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(store.tabs.count, 2, "One window asked for is one tab opened")
     }
 
+    /// A window opened only to hand an address to another app would sit blank once the app
+    /// took it, so no tab is opened for it. The scheme here is one no app registers, which is
+    /// also the case that must not put a prompt on screen.
+    @MainActor
+    func testWindowOpenForAnotherAppOpensNoTab() async throws {
+        let store = makeStore()
+        let coordinator = BrowserWebView.Coordinator(store: store)
+        let tabID = try XCTUnwrap(store.selectedTabID)
+        let tab = try XCTUnwrap(store.tabs.first(where: { $0.id == tabID }))
+        let profile = try XCTUnwrap(store.profiles.first(where: { $0.id == tab.profileID }))
+        let webView = WebViewPool.shared.webView(for: tab, profile: profile)
+        coordinator.attach(to: webView, tabID: tabID)
+
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString("<p>sign in</p>", baseURL: try XCTUnwrap(URL(string: "https://login.example.com")))
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        webView.navigationDelegate = coordinator
+
+        let opened = try await webView.evaluateJavaScript(
+            "String(window.open('jungle-tests-no-such-app://callback', '_blank'))",
+            in: nil,
+            contentWorld: .page
+        ) as? String
+
+        XCTAssertEqual(opened, "null")
+        XCTAssertEqual(store.tabs.count, 1)
+    }
+
+    /// A sign-in page that sends the tab itself to an app address is answered by the app, not
+    /// the tab: the page stays where it was, with no spinner left running and no error page.
+    @MainActor
+    func testMainFrameNavigationToAnotherAppLeavesTheTabOnItsPage() async throws {
+        let store = makeStore()
+        let coordinator = BrowserWebView.Coordinator(store: store)
+        let tabID = try XCTUnwrap(store.selectedTabID)
+        let tab = try XCTUnwrap(store.tabs.first(where: { $0.id == tabID }))
+        let profile = try XCTUnwrap(store.profiles.first(where: { $0.id == tab.profileID }))
+        let webView = WebViewPool.shared.webView(for: tab, profile: profile)
+        coordinator.attach(to: webView, tabID: tabID)
+
+        let page = try XCTUnwrap(URL(string: "https://login.example.com/done"))
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString("<p>signed in</p>", baseURL: page)
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        webView.navigationDelegate = coordinator
+
+        _ = try await webView.evaluateJavaScript(
+            "location.href = 'jungle-tests-no-such-app://callback'; 'sent'",
+            in: nil,
+            contentWorld: .page
+        )
+        try await Task.sleep(for: .milliseconds(500))
+
+        XCTAssertEqual(webView.url, page)
+        XCTAssertFalse(store.loadingTabIDs.contains(tabID))
+        XCTAssertNil(store.navigationFailures[tabID])
+        XCTAssertEqual(store.tabs.count, 1)
+    }
+
+    /// The observations a tab keeps on its web view end with the view. Held by the coordinator
+    /// they outlived every closed tab, and attaching the same view again must not add more.
+    @MainActor
+    func testWebViewObservationsLiveExactlyAsLongAsTheirWebView() {
+        let coordinator = BrowserWebView.Coordinator(store: makeStore())
+        weak var released: JungleWebView?
+        autoreleasepool {
+            let webView = JungleWebView(frame: .zero, configuration: WKWebViewConfiguration())
+            released = webView
+            coordinator.attach(to: webView, tabID: UUID())
+            coordinator.attach(to: webView, tabID: UUID())
+            XCTAssertEqual(webView.observations.count, 2)
+        }
+        XCTAssertNil(released, "An observation kept on the view must not keep the view alive")
+    }
+
     /// WebKit loads the popup it was handed. The tab it belongs to must not request the same
     /// address again: a second request for an attachment is a second download of the file.
     @MainActor
@@ -1640,6 +1831,72 @@ final class JungleTests: XCTestCase {
         let webView = WebViewPool.shared.webView(for: tab, profile: profile)
         XCTAssertFalse(webView.isLoading, "The redirected address was already requested once")
         XCTAssertNil(webView.url)
+    }
+
+    /// AVKit's Picture in Picture window, or any callback still pending, keeps a `WKWebView`
+    /// alive after its tab lets go, and the page kept a gigabyte of web process with it. The
+    /// test holds the view the whole time, the way Picture in Picture did.
+    @MainActor
+    func testDiscardClosesThePageEvenWhileTheViewIsStillHeld() async throws {
+        // The pool keeps a profile's store for the session, so a fresh one per run would pile
+        // up on disk; one fixed store is reused instead.
+        let dataStoreID = try XCTUnwrap(UUID(uuidString: "6A0C7E52-1D3B-4F4B-9C55-7A1E0D2B9F10"))
+        let profile = BrowserProfile(name: "Discard", symbol: "person", tint: .green, dataStoreID: dataStoreID)
+        let tab = BrowserTab(profileID: profile.id)
+        let webView = WebViewPool.shared.webView(for: tab, profile: profile)
+        try XCTSkipUnless(
+            webView.responds(to: NSSelectorFromString("_close"))
+                && webView.responds(to: NSSelectorFromString("_webProcessIdentifier")),
+            "This WebKit no longer answers to the private page calls"
+        )
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString("<!doctype html><p>Discard me</p>", baseURL: nil)
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        let processID = try XCTUnwrap((webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value)
+        XCTAssertGreaterThan(processID, 0)
+
+        WebViewPool.shared.discard(tab.id)
+
+        // A page that lets go of its process reports none. Whether the process itself has
+        // exited cannot be asked from here: the sandbox answers `kill(pid, 0)` with a refusal
+        // for a live process and a dead one alike.
+        XCTAssertEqual((webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value, 0, "the page is still open")
+    }
+
+    /// Chat and Calendar read the permission through `navigator.permissions` before their own
+    /// first post, so an allowed origin has to read `granted` there from document start.
+    @MainActor
+    func testAllowedOriginSeesGrantedNotificationsFromDocumentStart() async throws {
+        let origin = "https://notify.jungle.test"
+        SitePermissions.remember(true, for: origin, kinds: [.notifications])
+        defer { SitePermissions.forget(origin) }
+        let dataStoreID = try XCTUnwrap(UUID(uuidString: "6A0C7E52-1D3B-4F4B-9C55-7A1E0D2B9F10"))
+        let profile = BrowserProfile(name: "Notify", symbol: "person", tint: .green, dataStoreID: dataStoreID)
+        let tab = BrowserTab(profileID: profile.id)
+        let webView = WebViewPool.shared.webView(for: tab, profile: profile)
+        defer { WebViewPool.shared.discard(tab.id) }
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<!doctype html><script>window.firstRead = Notification.permission;</script>",
+            baseURL: URL(string: origin)
+        )
+        await fulfillment(of: [navigation.finished], timeout: 5)
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const status = await navigator.permissions.query({ name: 'notifications' });
+            return [window.firstRead, status.state,
+                    typeof ServiceWorkerRegistration === 'undefined' ? 'none'
+                        : String(ServiceWorkerRegistration.prototype.showNotification).includes('JungleNotification') ? 'jungle' : 'native'];
+            """,
+            contentWorld: .page
+        )
+        let values = try XCTUnwrap(result as? [String])
+        XCTAssertEqual(values[0], "granted")
+        XCTAssertEqual(values[1], "granted")
+        XCTAssertNotEqual(values[2], "native", "registration.showNotification still goes to WebKit")
     }
 }
 

@@ -36,6 +36,15 @@ enum SitePermissions {
         return answers.allSatisfy { $0 == true } ? true : nil
     }
 
+    /// Every origin that has answered `kind`, with its answer.
+    static func decisions(for kind: Kind) -> [String: Bool] {
+        let suffix = "|\(kind.rawValue)"
+        return stored().reduce(into: [:]) { result, entry in
+            guard entry.key.hasSuffix(suffix) else { return }
+            result[String(entry.key.dropLast(suffix.count))] = entry.value
+        }
+    }
+
     static func remember(_ allowed: Bool, for origin: String, kinds: [Kind]) {
         var stored = stored()
         kinds.forEach { stored[key(origin, $0)] = allowed }

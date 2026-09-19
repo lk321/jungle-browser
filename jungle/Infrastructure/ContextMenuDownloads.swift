@@ -15,6 +15,9 @@ protocol ContextMenuDownloadStarter: AnyObject {
 /// which runs the same download through `startDownload(using:)` and keeps the delegate.
 final class JungleWebView: WKWebView {
     weak var downloadStarter: (any ContextMenuDownloadStarter)?
+    /// The loading and address observations the browser keeps on this view. They live here so
+    /// they end with the view: kept anywhere else, they outlived every closed or slept tab.
+    var observations: [NSKeyValueObservation] = []
     /// What the pointer was over when the page last raised a context menu, by menu item.
     fileprivate var contextMenuDownloads: [String: URL] = [:]
 

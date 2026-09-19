@@ -202,34 +202,30 @@ enum DeveloperDiagnostics {
     }
 }
 
+/// Resolves the tab from the web view that sent the message rather than one captured when the
+/// handler was made: a popup shares its opener's content controller, and a captured id filed
+/// the popup's first paint under the opener — its own loading cover then waited for `load`.
 final class DeveloperMetricsMessageHandler: NSObject, WKScriptMessageHandler {
-    private let tabID: UUID
-
-    init(tabID: UUID) {
-        self.tabID = tabID
-    }
-
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? String,
-              let decoded = DeveloperDiagnostics.message(from: body)
+              let decoded = DeveloperDiagnostics.message(from: body),
+              let webView = message.webView,
+              let tabID = WebViewPool.shared.tabID(for: webView)
         else { return }
 
-        let tabID = self.tabID
-        Task { @MainActor in
-            switch decoded {
-            case .firstContentfulPaint:
-                NotificationCenter.default.post(
-                    name: .jungleFirstContentfulPaint,
-                    object: nil,
-                    userInfo: ["tabID": tabID]
-                )
-            case .metrics(let metrics):
-                NotificationCenter.default.post(
-                    name: .jungleDeveloperMetricsDidUpdate,
-                    object: nil,
-                    userInfo: ["tabID": tabID, "metrics": metrics]
-                )
-            }
+        switch decoded {
+        case .firstContentfulPaint:
+            NotificationCenter.default.post(
+                name: .jungleFirstContentfulPaint,
+                object: nil,
+                userInfo: ["tabID": tabID]
+            )
+        case .metrics(let metrics):
+            NotificationCenter.default.post(
+                name: .jungleDeveloperMetricsDidUpdate,
+                object: nil,
+                userInfo: ["tabID": tabID, "metrics": metrics]
+            )
         }
     }
 }

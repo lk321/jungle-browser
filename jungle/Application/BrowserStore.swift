@@ -33,6 +33,8 @@ final class BrowserStore: ObservableObject {
     /// until the page answers, because WebKit tears the floating window down the moment the
     /// view that owns the video leaves the window.
     @Published private(set) var pictureInPictureRequestTabID: UUID?
+    /// The find bar. Its own object, so typing in it redraws the bar and not the workspace.
+    let findInPage = FindInPage()
     /// Quick Access opens a saved page in place instead of adding a row to the tab list:
     /// bookmark id to the tab it owns. Kept out of persistence, so a relaunch starts with
     /// every tile closed.
@@ -53,7 +55,8 @@ final class BrowserStore: ObservableObject {
     private var copiedScreenshotFeedbackTask: Task<Void, Never>?
     private var pageZoomFeedbackTask: Task<Void, Never>?
     private var closingTabTasks: [UUID: Task<Void, Never>] = [:]
-    private var pictureInPictureObserver: AnyCancellable?
+    /// One per tab awaiting its reveal deadline: see `scheduleInitialContentRevealDeadline`.
+    private var revealDeadlineTasks: [UUID: Task<Void, Never>] = [:]
     private var audioObserver: AnyCancellable?
     private var firstContentfulPaintObserver: AnyCancellable?
     private var persistWorkspaceTask: Task<Void, Never>?
@@ -98,16 +101,6 @@ final class BrowserStore: ObservableObject {
                     )
                 }
             }
-        pictureInPictureObserver = NotificationCenter.default
-            .publisher(for: .junglePictureInPictureDidChange)
-            .sink { [weak self] notification in
-                guard let tabID = notification.userInfo?["tabID"] as? UUID,
-                      let isActive = notification.userInfo?["isActive"] as? Bool
-                else { return }
-                Task { @MainActor [weak self] in
-                    self?.pictureInPictureDidChange(isActive: isActive, tabID: tabID)
-                }
-            }
         audioObserver = NotificationCenter.default
             .publisher(for: .jungleAudioDidChange)
             .sink { [weak self] notification in
@@ -136,6 +129,7 @@ final class BrowserStore: ObservableObject {
         copiedScreenshotFeedbackTask?.cancel()
         pageZoomFeedbackTask?.cancel()
         closingTabTasks.values.forEach { $0.cancel() }
+        revealDeadlineTasks.values.forEach { $0.cancel() }
         persistWorkspaceTask?.cancel()
     }
 
@@ -198,10 +192,19 @@ final class BrowserStore: ObservableObject {
         activeProfileID = tabs[index].profileID
         selectedTabID = tabID
         if previousTabID != tabID {
+            // Find belongs to the page it searched, like the zoom badge below.
+            findInPage.dismiss()
             // The badge belongs to the tab it was raised over, not to the one arriving.
             pageZoomFeedbackTask?.cancel()
             pageZoomFeedback = nil
             previouslySelectedTabID = previousTabID
+            // Idle time is measured from when a tab stopped being selected, not from when it
+            // was last selected: stamping only the arriving tab left the one being left behind
+            // with a stale timestamp, so `discardIdleTabs` could suspend a tab the user had just
+            // spent twenty minutes reading, seconds after they switched away from it.
+            if let previousTabID, let previousIndex = tabs.firstIndex(where: { $0.id == previousTabID }) {
+                tabs[previousIndex].lastActivatedAt = .now
+            }
         }
         tabs[index].lastActivatedAt = .now
         tabs[index].isSuspended = false
@@ -217,6 +220,7 @@ final class BrowserStore: ObservableObject {
         tabs.remove(at: index)
         loadingTabIDs.remove(tabID)
         initialContentReadyTabIDs.remove(tabID)
+        cancelInitialContentRevealDeadline(for: tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
         lastScriptedPopupDates.removeValue(forKey: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
@@ -226,6 +230,7 @@ final class BrowserStore: ObservableObject {
         if copiedScreenshotTabID == tabID { copiedScreenshotTabID = nil }
         navigationFailures.removeValue(forKey: tabID)
         releasePictureInPicture(for: tabID)
+        if findInPage.tabID == tabID { findInPage.dismiss() }
         WebViewPool.shared.discard(tabID)
         guard wasSelected else {
             persistWorkspace()
@@ -427,6 +432,19 @@ final class BrowserStore: ObservableObject {
         guard selectedTabID != tabID, tabs.contains(where: { $0.id == tabID }) else { return }
         // Returning one PiP window inline must not put media from the current tab in PiP.
         select(tabID, entersPictureInPictureWhenLeaving: false)
+    }
+
+    /// ⌘F. Only a page that is loaded has anything to search.
+    func presentFindInPage() {
+        guard let tab = selectedTab, let webView = loadedWebView(for: tab) else { return }
+        findInPage.present(tabID: tab.id, webView: webView)
+    }
+
+    /// Escape or Done: the keyboard goes back to the page, so Space scrolls it again.
+    func dismissFindInPage() {
+        let webView = loadedWebView(for: selectedTab)
+        findInPage.dismiss()
+        webView?.window?.makeFirstResponder(webView)
     }
 
     func toggleWebInspector() {
@@ -931,6 +949,29 @@ final class BrowserStore: ObservableObject {
         // A committed document covers whatever failed before it, including the same-document
         // moves that never start a navigation. Otherwise the error page stays over a live page.
         navigationFailures.removeValue(forKey: tabID)
+        scheduleInitialContentRevealDeadline(for: tabID)
+    }
+
+    /// First-contentful-paint is the primary signal for uncovering a tab, but a heavy page can
+    /// take up to a minute to report it (or never does, for a resource that has no notion of
+    /// paint). A committed navigation already has something in the web view, so a short bound
+    /// keeps the opaque cover from hiding an already-painted page far past the point it matters.
+    private func scheduleInitialContentRevealDeadline(for tabID: UUID) {
+        guard !initialContentReadyTabIDs.contains(tabID) else { return }
+        revealDeadlineTasks[tabID]?.cancel()
+        revealDeadlineTasks[tabID] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self else { return }
+            self.revealDeadlineTasks.removeValue(forKey: tabID)
+            guard self.tabs.contains(where: { $0.id == tabID && !$0.isSuspended }) else { return }
+            self.initialContentReadyTabIDs.insert(tabID)
+        }
+    }
+
+    /// Drops a pending reveal deadline without firing it, for a tab that closed, suspended, or
+    /// lost its web content before the deadline had a reason to run.
+    private func cancelInitialContentRevealDeadline(for tabID: UUID) {
+        revealDeadlineTasks.removeValue(forKey: tabID)?.cancel()
     }
 
     func didStartNavigation(for tabID: UUID) {
@@ -952,6 +993,7 @@ final class BrowserStore: ObservableObject {
 
     func didFinishNavigation(for tabID: UUID, title: String?, url: URL?) {
         setNavigationLoading(false, for: tabID)
+        findInPage.pageDidChange(in: tabID)
         navigationFailures.removeValue(forKey: tabID)
         // ponytail: still the reveal of last resort. A document that never reports a
         // contentful paint — a PDF, an image, an empty response — has no other signal.
@@ -986,8 +1028,13 @@ final class BrowserStore: ObservableObject {
         audibleTabIDs.remove(tabID)
         setNavigationLoading(false, for: tabID)
         initialContentReadyTabIDs.remove(tabID)
+        cancelInitialContentRevealDeadline(for: tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
         developerMetricsByTabID.removeValue(forKey: tabID)
+        // The crashed process's web view still holds the old URL, so `loadSelectedTabIfNeeded`
+        // would see a non-nil `url` and never reload it. Discarding it means the next attach
+        // builds a fresh web view with no URL, which does load.
+        WebViewPool.shared.discard(tabID)
     }
 
     func setNavigationLoading(_ isLoading: Bool, for tabID: UUID) {
@@ -1051,10 +1098,20 @@ final class BrowserStore: ObservableObject {
     private func requestPictureInPicture(for tabID: UUID) {
         pictureInPictureRequestTabID = tabID
         Task { [weak self] in
-            guard await WebViewPool.shared.enterPictureInPicture(for: tabID) == false else { return }
-            // ponytail: a page that accepts the request but never reports the mode change
-            // keeps its web view attached until the next tab switch replaces the request.
-            guard let self, self.pictureInPictureRequestTabID == tabID else { return }
+            let didAccept = await WebViewPool.shared.enterPictureInPicture(for: tabID)
+            if didAccept {
+                // ponytail: WebKit can accept the request and then refuse silently, so the wait
+                // is bounded instead of holding the web view in the window forever. WebKit's
+                // delegate call clears the request sooner when the window does open.
+                try? await Task.sleep(for: .seconds(2))
+            }
+            guard let self, self.pictureInPictureRequestTabID == tabID, self.pictureInPictureTabID != tabID else { return }
+            // A window that took longer than the wait to open is adopted, never dropped: dropping
+            // it hides the tab that owns the video and leaves the floating window empty.
+            if WebViewPool.shared.isPictureInPictureActive(tabID) {
+                self.pictureInPictureDidChange(isActive: true, tabID: tabID)
+                return
+            }
             self.pictureInPictureRequestTabID = nil
         }
     }
@@ -1078,7 +1135,11 @@ final class BrowserStore: ObservableObject {
         let cutoff = Date.now.addingTimeInterval(-settings.tabSleepInterval)
         let candidates = Self.idleTabs(in: tabs, cutoff: cutoff, selectedTabID: selectedTabID)
             .filter { WebViewPool.shared.contains($0.id) }
+        // A site allowed to notify is one the user wants to hear from: asleep, a chat or a
+        // calendar tab has no page left to post the message.
+        let notifyingOrigins = Set(SitePermissions.decisions(for: .notifications).filter(\.value).keys)
         for tab in candidates {
+            if let origin = SitePermissions.describe(tab.address), notifyingOrigins.contains(origin) { continue }
             // An open Web Inspector session dies with the web process it inspects.
             if let webView = loadedWebView(for: tab), WebInspector.isConnected(for: webView) { continue }
             WebViewPool.shared.holdsPlayback(tab.id) { [weak self] holdsPlayback in
@@ -1098,6 +1159,7 @@ final class BrowserStore: ObservableObject {
         update(tabID) { $0.isSuspended = true }
         loadingTabIDs.remove(tabID)
         initialContentReadyTabIDs.remove(tabID)
+        cancelInitialContentRevealDeadline(for: tabID)
         lastRequestedAddresses.removeValue(forKey: tabID)
         WebViewPool.shared.takeSnapshot(of: tabID, width: 720) { [weak self] image in
             Task { @MainActor in

@@ -96,6 +96,23 @@ struct JungleApp: App {
                     .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .control)
                 }
             }
+            // Edit, where every browser keeps Find. Ahead of the system's own Find items, which
+            // have nothing to search in a web view, so ⌘F reaches this one.
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                Button("Find in Page…") {
+                    NotificationCenter.default.post(name: .jungleFindInPage, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                Button("Find Next") {
+                    NotificationCenter.default.post(name: .jungleFindNext, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: .command)
+                Button("Find Previous") {
+                    NotificationCenter.default.post(name: .jungleFindPrevious, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+            }
             CommandGroup(after: .sidebar) {
                 Button("Zoom In") {
                     NotificationCenter.default.post(name: .jungleZoomIn, object: nil)
@@ -154,7 +171,9 @@ extension Notification.Name {
     static let jungleActualSize = Notification.Name("jungle.actual-size")
     static let jungleReloadIgnoringCache = Notification.Name("jungle.reload-ignoring-cache")
     static let jungleTogglePictureInPicture = Notification.Name("jungle.toggle-picture-in-picture")
-    static let junglePictureInPictureDidChange = Notification.Name("jungle.picture-in-picture-did-change")
+    static let jungleFindInPage = Notification.Name("jungle.find-in-page")
+    static let jungleFindNext = Notification.Name("jungle.find-next")
+    static let jungleFindPrevious = Notification.Name("jungle.find-previous")
     static let jungleAudioDidChange = Notification.Name("jungle.audio-did-change")
     static let jungleToggleWebInspector = Notification.Name("jungle.toggle-web-inspector")
     static let jungleShowJavaScriptConsole = Notification.Name("jungle.show-javascript-console")

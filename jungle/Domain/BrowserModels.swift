@@ -183,6 +183,19 @@ enum BrowserAddress {
         }
     }
 
+    /// Schemes WebKit loads itself, on top of the app's own `jungle:` pages.
+    private static let schemesWebKitLoads: Set<String> = [
+        "http", "https", "about", "blob", "data", "file", "javascript", "ws", "wss"
+    ]
+
+    /// Whether an address belongs to another app: `mailto:`, `zoommtg:`, the `claude:` link a
+    /// sign-in page sends back. WebKit drops these without a word, so they have to be handed
+    /// over to whichever app registered the scheme.
+    static func opensInAnotherApp(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), !scheme.isEmpty else { return false }
+        return !schemesWebKitLoads.contains(scheme) && scheme != nativeNewTab.scheme?.lowercased()
+    }
+
     static func usesInsecureHTTP(_ url: URL) -> Bool {
         url.scheme?.lowercased() == "http"
     }

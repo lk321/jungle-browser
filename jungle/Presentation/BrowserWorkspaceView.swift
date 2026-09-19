@@ -135,6 +135,9 @@ struct BrowserWorkspaceView: View {
         .onReceive(NotificationCenter.default.publisher(for: .jungleZoomOut)) { _ in store.zoomOut() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleActualSize)) { _ in store.resetPageZoom() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleTogglePictureInPicture)) { _ in store.togglePictureInPicture() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleFindInPage)) { _ in store.presentFindInPage() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleFindNext)) { _ in store.findInPage.next() }
+        .onReceive(NotificationCenter.default.publisher(for: .jungleFindPrevious)) { _ in store.findInPage.previous() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleToggleWebInspector)) { _ in store.toggleWebInspector() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleShowJavaScriptConsole)) { _ in store.showJavaScriptConsole() }
         .onReceive(NotificationCenter.default.publisher(for: .jungleDeveloperMetricsDidUpdate)) { notification in
@@ -214,6 +217,9 @@ struct BrowserWorkspaceView: View {
                     ContentHeaderDragArea()
                         .frame(height: ContentHeaderDragArea.height)
                         .accessibilityHidden(true)
+                }
+                .overlay(alignment: .topTrailing) {
+                    FindInPageOverlay(store: store)
                 }
                 .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
                 .animation(.easeOut(duration: 0.16), value: store.copiedTabAddress)
@@ -528,6 +534,29 @@ private struct CopiedAddressFeedback: View {
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().stroke(.white.opacity(0.14)))
         .shadow(radius: 10, y: 4)
+    }
+}
+
+/// Observes the find session on its own, so each keystroke redraws the bar and not the page.
+private struct FindInPageOverlay: View {
+    let store: BrowserStore
+    @ObservedObject private var find: FindInPage
+
+    init(store: BrowserStore) {
+        self.store = store
+        find = store.findInPage
+    }
+
+    var body: some View {
+        ZStack {
+            if find.isPresented {
+                FindInPageBar(find: find, dismiss: store.dismissFindInPage)
+                    .padding(.top, ContentHeaderDragArea.height + 4)
+                    .padding(.trailing, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(duration: 0.24, bounce: 0.18), value: find.isPresented)
     }
 }
 
@@ -1372,7 +1401,7 @@ private struct BrowserSidebar: View {
             tabID: tab.id,
             isDropTargeted: isTabTargeted(tab.id),
             isDragging: draggedItem == .tab(tab.id),
-            suppressActivation: shouldSuppressActivation,
+            isActivationSuppressed: { shouldSuppressActivation },
             beginDrag: beginDrag,
             dragChanged: dragChanged,
             finishDrag: finishDrag
@@ -1767,7 +1796,9 @@ private struct SidebarTabRow: View {
     let tabID: UUID
     let isDropTargeted: Bool
     let isDragging: Bool
-    let suppressActivation: Bool
+    /// Asked at click time. A `Bool` captured at render time stayed `true` after a drag until
+    /// something else redrew the list, so the next click on a tab did nothing.
+    let isActivationSuppressed: () -> Bool
     let beginDrag: (BrowserDragPayload) -> Void
     let dragChanged: (SidebarDropTarget, CGPoint) -> Void
     let finishDrag: (SidebarDropTarget, CGPoint) -> Void
@@ -1850,20 +1881,25 @@ private struct SidebarTabRow: View {
 
     private func row(_ tab: BrowserTab) -> some View {
         ZStack(alignment: .trailing) {
-            Button { if !suppressActivation { store.select(tabID) } } label: { rowContent(tab) }
-                .buttonStyle(.plain)
-                .contentShape(Rectangle())
+            // The padding and the shape live inside the label so the whole row is the button,
+            // not just the favicon and the title.
+            Button { if !isActivationSuppressed() { store.select(tabID) } } label: {
+                rowContent(tab)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
             // The speaker keeps its slot whether or not the close button is showing, so it
             // never slides sideways under the pointer as the row is hovered.
             HStack(spacing: 6) {
                 speakerButton
                 closeButton(tab)
             }
+            .padding(.trailing, 10)
             .animation(.easeOut(duration: 0.14), value: showsSpeaker)
             .animation(.easeOut(duration: 0.12), value: isMuted)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
         .contentShape(Rectangle())
         .background {
             if isSelected {

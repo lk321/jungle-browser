@@ -29,8 +29,11 @@ struct BrowserWebView: NSViewRepresentable {
         let holdHostView = store.pictureInPictureHoldTabID.flatMap { WebViewPool.shared.attachedHostView(for: $0) }
         for hostView in container.subviews {
             let isVisible = hostView === visibleHostView
-            // The tab holding the floating window stays in the window, just out of sight.
+            // The tab holding the floating window stays in the window, just out of sight. WebKit's
+            // own answer counts too, so a window the store has not heard about yet is never
+            // hidden into a page that says "playing in Picture in Picture" with nothing on screen.
             hostView.isHidden = !isVisible && hostView !== holdHostView
+                && !WebViewPool.shared.hostsPictureInPicture(hostView)
             hostView.alphaValue = isVisible ? 1 : 0
         }
         store.loadSelectedTabIfNeeded()
@@ -71,11 +74,12 @@ struct BrowserWebView: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, ContextMenuDownloadStarter {
         let store: BrowserStore
-        private var loadingObservations: [UUID: NSKeyValueObservation] = [:]
-        private var addressObservations: [UUID: NSKeyValueObservation] = [:]
-        private var observedWebViewIDs: [UUID: ObjectIdentifier] = [:]
         private var downloadIDs: [ObjectIdentifier: UUID] = [:]
         private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
+        /// Whether a prompt to open another app is on screen. Asks that arrive meanwhile are
+        /// dropped, not queued: a page firing the same app link in a loop would otherwise
+        /// stack one alert behind another.
+        private var isAskingToOpenApp: Bool = false
 
         init(store: BrowserStore) {
             self.store = store
@@ -85,31 +89,44 @@ struct BrowserWebView: NSViewRepresentable {
             if webView.navigationDelegate !== self { webView.navigationDelegate = self }
             if webView.uiDelegate !== self { webView.uiDelegate = self }
             (webView as? JungleWebView)?.downloadStarter = self
-            guard observedWebViewIDs[tabID] != ObjectIdentifier(webView) else { return }
-            observedWebViewIDs[tabID] = ObjectIdentifier(webView)
-            loadingObservations[tabID] = webView.observe(\WKWebView.isLoading, options: [.initial, .new]) { [weak self] webView, change in
+            // The observations are kept on the view, so a view that has them is already
+            // observed, and they go away with it when its tab closes or sleeps.
+            guard let webView = webView as? JungleWebView, webView.observations.isEmpty else { return }
+            // The store, not the coordinator: the observations outlive this coordinator when
+            // SwiftUI builds a new one, and the check above never observes the view again.
+            let store: BrowserStore = store
+            let loading: NSKeyValueObservation = webView.observe(\.isLoading, options: [.initial, .new]) { [weak store] webView, change in
                 let isLoading = change.newValue ?? webView.isLoading
-                Task { @MainActor [weak self] in
-                    self?.store.setNavigationLoading(isLoading, for: tabID)
+                Task { @MainActor [weak store] in
+                    store?.setNavigationLoading(isLoading, for: tabID)
                 }
             }
             // `didCommit` never fires for a same-document navigation, which is how YouTube and
             // every other pushState app moves between pages. Observing the property covers
             // both kinds of navigation with one mechanism.
-            addressObservations[tabID] = webView.observe(\WKWebView.url, options: [.new]) { [weak self] webView, _ in
+            let address: NSKeyValueObservation = webView.observe(\.url, options: [.new]) { [weak store] webView, _ in
                 let url = webView.url
-                Task { @MainActor [weak self] in
-                    self?.store.didCommitNavigation(for: tabID, url: url)
+                Task { @MainActor [weak store] in
+                    store?.didCommitNavigation(for: tabID, url: url)
                 }
             }
+            webView.observations = [loading, address]
         }
 
         /// Delegate callbacks arrive for every tab this coordinator serves, so the tab is
         /// resolved from the web view rather than from whichever tab is on screen.
         private func tabID(of webView: WKWebView) -> UUID? { WebViewPool.shared.tabID(for: webView) }
 
+        /// WebKit's private UI delegate call, the one Safari tracks Picture in Picture with. It
+        /// fires for every frame and shadow root, whichever control started or ended it.
+        @objc(_webView:hasVideoInPictureInPictureDidChange:)
+        func webView(_ webView: WKWebView, hasVideoInPictureInPictureDidChange isActive: Bool) {
+            guard let tabID = tabID(of: webView) else { return }
+            WebViewPool.shared.pictureInPictureDidChange(isActive: isActive, tabID: tabID)
+            store.pictureInPictureDidChange(isActive: isActive, tabID: tabID)
+        }
+
         func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-            WebNotifications.shared.seedPermission(in: webView)
             guard let tabID = tabID(of: webView) else { return }
             store.didCommitNavigation(for: tabID, url: webView.url)
         }
@@ -201,6 +218,22 @@ struct BrowserWebView: NSViewRepresentable {
                 startDownload(from: address, in: webView)
                 return
             }
+            // A link asking for a new window arrives here with no target frame, ahead of the
+            // window itself; it is answered where the window is asked for, so it is asked once.
+            if let address = navigationAction.request.url,
+               BrowserAddress.opensInAnotherApp(address),
+               let targetFrame = navigationAction.targetFrame {
+                decisionHandler(.cancel)
+                // An embedded frame reaching for an app on its own is an ad, not the page.
+                guard targetFrame.isMainFrame || navigationAction.navigationType == .linkActivated else { return }
+                askToOpenInAnotherApp(address, from: webView)
+                // A tab opened only to bounce to the app never gets a document; same cleanup
+                // as a tab opened only to carry a download.
+                if targetFrame.isMainFrame, webView.backForwardList.currentItem == nil, let tabID = tabID(of: webView) {
+                    store.closeTabOpenedForDownload(tabID)
+                }
+                return
+            }
             guard let destination = BrowserStore.commandClickDestination(
                 navigationType: navigationAction.navigationType,
                 modifierFlags: navigationAction.modifierFlags,
@@ -234,6 +267,14 @@ struct BrowserWebView: NSViewRepresentable {
             for navigationAction: WKNavigationAction,
             windowFeatures: WKWindowFeatures
         ) -> WKWebView? {
+            // An app link never gets a tab: it would stay blank once the app took the address.
+            // It is settled before the popup checks so it does not spend the tab's popup budget.
+            if let address = navigationAction.request.url, BrowserAddress.opensInAnotherApp(address) {
+                if navigationAction.sourceFrame.isMainFrame || navigationAction.navigationType == .linkActivated {
+                    askToOpenInAnotherApp(address, from: webView)
+                }
+                return nil
+            }
             guard let destination = BrowserStore.newWindowDestination(
                 shouldPerformDownload: navigationAction.shouldPerformDownload,
                 requestURL: navigationAction.request.url
@@ -255,6 +296,32 @@ struct BrowserWebView: NSViewRepresentable {
         private static func isEmbeddedOtherSiteFrame(_ frame: WKFrameInfo, in webView: WKWebView) -> Bool {
             guard !frame.isMainFrame else { return false }
             return !BrowserStore.isSameSite(frameHost: frame.securityOrigin.host, pageHost: webView.url?.host)
+        }
+
+        /// Hands an address WebKit cannot load to the app registered for it, once the user
+        /// allows it — the "Open App" button a sign-in page shows did nothing at all before.
+        /// Nothing is asked when no app on this Mac takes the scheme: there is nothing to allow.
+        private func askToOpenInAnotherApp(_ address: URL, from webView: WKWebView) {
+            guard !isAskingToOpenApp,
+                  let applicationURL = NSWorkspace.shared.urlForApplication(toOpen: address)
+            else { return }
+            isAskingToOpenApp = true
+            // `displayName` keeps the extension when Finder is set to show them all.
+            let fileName: String = FileManager.default.displayName(atPath: applicationURL.path)
+            let appName: String = fileName.hasSuffix(".app") ? String(fileName.dropLast(4)) : fileName
+            let site: String = SitePermissions.describe(webView.url) ?? "This page"
+            let window: NSWindow? = webView.window
+            Task { @MainActor [weak self] in
+                let choice = await SitePermissions.ask(
+                    "Do you want to allow this website to open \u{201C}\(appName)\u{201D}?",
+                    information: "\(site) wants to open a link in another app.",
+                    buttons: ["Allow", "Cancel"],
+                    in: window
+                )
+                self?.isAskingToOpenApp = false
+                guard choice == 0 else { return }
+                NSWorkspace.shared.open(address)
+            }
         }
 
         func webView(
