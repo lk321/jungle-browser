@@ -19,7 +19,7 @@ xcodebuild -project jungle.xcodeproj -scheme jungle -destination 'platform=macOS
 
 ## Invariants
 
-- A tab record never retains a web view. Inactive views are snapshotted and released after the configured idle interval.
+- A tab record never retains a web view. Inactive views are snapshotted and released after the configured idle interval, sooner under system memory pressure.
 - Resuming a suspended tab loads its last committed URL. Do not claim that a discarded WebKit process preserves JavaScript or form state.
 - Keep WebKit delegates and UI mutations on the main actor.
 - Add domain tests for pure lifecycle and URL changes. Keep UI tests focused on visible user flows.

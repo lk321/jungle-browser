@@ -32,7 +32,7 @@ final class JungleTests: XCTestCase {
     @MainActor
     func testSitePermissionsCombineStoredDeviceAnswers() {
         let origin = "https://tests.jungle.invalid"
-        defer { SitePermissions.forget(origin) }
+        defer { SitePermissions.forget([.camera, .microphone, .notifications], for: origin) }
 
         XCTAssertNil(SitePermissions.decision(for: origin, kinds: [.camera, .microphone]))
 
@@ -46,6 +46,12 @@ final class JungleTests: XCTestCase {
         SitePermissions.remember(false, for: origin, kinds: [.microphone])
         XCTAssertEqual(SitePermissions.decision(for: origin, kinds: [.camera, .microphone]), false)
         XCTAssertNil(SitePermissions.decision(for: origin, kinds: [.notifications]))
+
+        // Revoking one kind from Settings leaves the site's other answers alone.
+        SitePermissions.remember(true, for: origin, kinds: [.notifications])
+        SitePermissions.forget([.notifications], for: origin)
+        XCTAssertNil(SitePermissions.decision(for: origin, kinds: [.notifications]))
+        XCTAssertEqual(SitePermissions.decision(for: origin, kinds: [.camera]), true)
     }
 
     @MainActor
@@ -80,10 +86,24 @@ final class JungleTests: XCTestCase {
         let selected = BrowserTab(profileID: profileID, lastActivatedAt: cutoff.addingTimeInterval(-60))
         let pinned = BrowserTab(profileID: profileID, lastActivatedAt: cutoff.addingTimeInterval(-60), isPinned: true)
         let recent = BrowserTab(profileID: profileID, lastActivatedAt: cutoff.addingTimeInterval(60))
+        let quickAccess = BrowserTab(profileID: profileID, lastActivatedAt: cutoff.addingTimeInterval(-60))
+        let all = [idle, selected, pinned, recent, quickAccess]
 
-        let candidates = BrowserStore.idleTabs(in: [idle, selected, pinned, recent], cutoff: cutoff, selectedTabID: selected.id)
+        let candidates = BrowserStore.idleTabs(in: all, cutoff: cutoff, selectedTabID: selected.id, quickAccessTabIDs: [quickAccess.id])
 
         XCTAssertEqual(candidates.map(\.id), [idle.id])
+        let underPressure = BrowserStore.idleTabs(
+            in: all, cutoff: cutoff, selectedTabID: selected.id, quickAccessTabIDs: [quickAccess.id], includesPinned: true
+        )
+        XCTAssertEqual(underPressure.map(\.id), [idle.id, pinned.id, quickAccess.id])
+    }
+
+    @MainActor
+    func testMemoryPressureShortensTheSleepDelay() {
+        XCTAssertEqual(BrowserStore.sleepDelay(interval: 900, pressure: .normal), 900)
+        XCTAssertEqual(BrowserStore.sleepDelay(interval: 900, pressure: .warning), 60)
+        XCTAssertEqual(BrowserStore.sleepDelay(interval: 30, pressure: .warning), 30)
+        XCTAssertEqual(BrowserStore.sleepDelay(interval: 900, pressure: .critical), 0)
     }
 
     /// Idle time has to be measured from when a tab stopped being selected, not from when it
@@ -1870,7 +1890,7 @@ final class JungleTests: XCTestCase {
     func testAllowedOriginSeesGrantedNotificationsFromDocumentStart() async throws {
         let origin = "https://notify.jungle.test"
         SitePermissions.remember(true, for: origin, kinds: [.notifications])
-        defer { SitePermissions.forget(origin) }
+        defer { SitePermissions.forget([.notifications], for: origin) }
         let dataStoreID = try XCTUnwrap(UUID(uuidString: "6A0C7E52-1D3B-4F4B-9C55-7A1E0D2B9F10"))
         let profile = BrowserProfile(name: "Notify", symbol: "person", tint: .green, dataStoreID: dataStoreID)
         let tab = BrowserTab(profileID: profile.id)

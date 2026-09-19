@@ -9,6 +9,8 @@ struct BrowserSettingsView: View {
     @State private var selectedCategory: SettingsCategory = .general
     @ObservedObject private var contentBlocking = ContentBlocking.shared
     @State private var isCheckingForListUpdates = false
+    /// Every site that has answered the notification prompt, with its answer.
+    @State private var notificationSites: [String: Bool] = [:]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -39,6 +41,7 @@ struct BrowserSettingsView: View {
         .onAppear {
             defaultBrowserController.refresh()
             notificationController.refreshAuthorizationStatus()
+            notificationSites = SitePermissions.decisions(for: .notifications)
         }
     }
 
@@ -243,7 +246,7 @@ struct BrowserSettingsView: View {
                 Text("15 minutes").tag(TimeInterval(900))
             }
             .pickerStyle(.menu)
-            caption("Suspended tabs release their WebKit view and reload their last address when opened.")
+            caption("Suspended tabs release their WebKit view and reload their last address when opened. When macOS runs low on memory, background tabs sleep sooner. Pinned and Quick Access tabs stay awake, and sleep only when memory is critical.")
         }
     }
 
@@ -305,7 +308,53 @@ struct BrowserSettingsView: View {
                 }
                 caption("Each website still asks for permission separately. Permissions are kept with its profile.")
             }
+
+            settingsSection("Website notifications") {
+                if notificationSites.isEmpty {
+                    caption("No website has asked to send notifications yet.")
+                }
+                ForEach(notificationSites.keys.sorted(), id: \.self) { origin in
+                    HStack(spacing: 10) {
+                        Text(origin)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Toggle(
+                            "Allow notifications from \(origin)",
+                            isOn: Binding(
+                                get: { notificationSites[origin] == true },
+                                set: { setNotificationPermission($0, for: origin) }
+                            )
+                        )
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        Button {
+                            setNotificationPermission(nil, for: origin)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Remove, so the site asks again")
+                        .accessibilityLabel("Remove \(origin)")
+                    }
+                }
+                caption("A site allowed to notify keeps its tab awake so it can post. Turn it off to let the tab sleep and free its memory; remove it to have the site ask again.")
+            }
         }
+    }
+
+    /// `nil` forgets the answer, so the site asks again next time.
+    private func setNotificationPermission(_ allowed: Bool?, for origin: String) {
+        if let allowed {
+            SitePermissions.remember(allowed, for: origin, kinds: [.notifications])
+        } else {
+            SitePermissions.forget([.notifications], for: origin)
+        }
+        // Answers are baked into every tab's script; open pages pick the change up on their next load.
+        WebViewPool.shared.reinstallUserScripts()
+        notificationSites = SitePermissions.decisions(for: .notifications)
     }
 
     private var extensionSettings: some View {

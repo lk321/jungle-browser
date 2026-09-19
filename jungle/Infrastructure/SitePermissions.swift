@@ -51,9 +51,9 @@ enum SitePermissions {
         UserDefaults.standard.set(stored, forKey: defaultsKey)
     }
 
-    static func forget(_ origin: String) {
+    static func forget(_ kinds: [Kind], for origin: String) {
         var stored = stored()
-        stored.keys.filter { $0.hasPrefix("\(origin)|") }.forEach { stored.removeValue(forKey: $0) }
+        kinds.forEach { stored.removeValue(forKey: key(origin, $0)) }
         UserDefaults.standard.set(stored, forKey: defaultsKey)
     }
 

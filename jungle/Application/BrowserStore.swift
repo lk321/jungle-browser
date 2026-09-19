@@ -50,6 +50,10 @@ final class BrowserStore: ObservableObject {
     private let persistence: BrowserPersistence
     private let extensionRuntime: ChromeDeclarativeExtensionRuntime
     private var housekeepingTask: Task<Void, Never>?
+    /// The kernel's memory pressure signal, the same one WebKit listens to. WebKit answers it by
+    /// trimming its caches; only the app can put whole background pages to sleep.
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var memoryPressure: MemoryPressure = .normal
     private var tabPreviewTask: Task<Void, Never>?
     private var copiedAddressFeedbackTask: Task<Void, Never>?
     private var copiedScreenshotFeedbackTask: Task<Void, Never>?
@@ -124,6 +128,7 @@ final class BrowserStore: ObservableObject {
 
     deinit {
         housekeepingTask?.cancel()
+        memoryPressureSource?.cancel()
         tabPreviewTask?.cancel()
         copiedAddressFeedbackTask?.cancel()
         copiedScreenshotFeedbackTask?.cancel()
@@ -172,6 +177,16 @@ final class BrowserStore: ObservableObject {
                 self?.discardIdleTabs()
             }
         }
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.normal, .warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let event = self.memoryPressureSource?.data else { return }
+                self.memoryPressure = event.contains(.critical) ? .critical : event.contains(.warning) ? .warning : .normal
+                self.discardIdleTabs()
+            }
+        }
+        memoryPressureSource = source
+        source.resume()
     }
 
     func createTab() {
@@ -1125,19 +1140,49 @@ final class BrowserStore: ObservableObject {
     /// How much browsing history stays in memory. The database keeps the rest.
     static let retainedHistoryCount = 1000
 
-    static func idleTabs(in tabs: [BrowserTab], cutoff: Date, selectedTabID: UUID?) -> [BrowserTab] {
+    enum MemoryPressure { case normal, warning, critical }
+
+    /// A Quick Access tab is kept like a pinned one: it is where the chat and mail the user
+    /// wants to hear from live, whatever origin their notifications end up coming from.
+    static func idleTabs(
+        in tabs: [BrowserTab],
+        cutoff: Date,
+        selectedTabID: UUID?,
+        quickAccessTabIDs: Set<UUID> = [],
+        includesPinned: Bool = false
+    ) -> [BrowserTab] {
         tabs.filter { tab in
-            tab.id != selectedTabID && !tab.isPinned && !tab.isSuspended && tab.lastActivatedAt < cutoff
+            let isKept = tab.isPinned || quickAccessTabIDs.contains(tab.id)
+            return tab.id != selectedTabID && (includesPinned || !isKept) && !tab.isSuspended && tab.lastActivatedAt < cutoff
+        }
+    }
+
+    /// How long a background tab stays awake. Under memory pressure a minute away is idle
+    /// enough; under critical pressure no background tab stays, pinned and Quick Access ones included, because
+    /// the alternative is macOS swapping or killing web processes at random.
+    static func sleepDelay(interval: TimeInterval, pressure: MemoryPressure) -> TimeInterval {
+        switch pressure {
+        case .normal: interval
+        case .warning: min(interval, 60)
+        case .critical: 0
         }
     }
 
     private func discardIdleTabs() {
-        let cutoff = Date.now.addingTimeInterval(-settings.tabSleepInterval)
-        let candidates = Self.idleTabs(in: tabs, cutoff: cutoff, selectedTabID: selectedTabID)
+        let cutoff = Date.now.addingTimeInterval(-Self.sleepDelay(interval: settings.tabSleepInterval, pressure: memoryPressure))
+        let candidates = Self.idleTabs(
+            in: tabs,
+            cutoff: cutoff,
+            selectedTabID: selectedTabID,
+            quickAccessTabIDs: quickAccessTabIDSet,
+            includesPinned: memoryPressure == .critical
+        )
             .filter { WebViewPool.shared.contains($0.id) }
         // A site allowed to notify is one the user wants to hear from: asleep, a chat or a
-        // calendar tab has no page left to post the message.
-        let notifyingOrigins = Set(SitePermissions.decisions(for: .notifications).filter(\.value).keys)
+        // calendar tab has no page left to post the message. Critical pressure outranks it.
+        let notifyingOrigins = memoryPressure == .critical
+            ? []
+            : Set(SitePermissions.decisions(for: .notifications).filter(\.value).keys)
         for tab in candidates {
             if let origin = SitePermissions.describe(tab.address), notifyingOrigins.contains(origin) { continue }
             // An open Web Inspector session dies with the web process it inspects.
