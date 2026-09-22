@@ -2044,6 +2044,20 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(values[1], "granted")
         XCTAssertNotEqual(values[2], "native", "registration.showNotification still goes to WebKit")
     }
+
+    /// The release has to reach sounds made with `new Audio()`, which only the page's world
+    /// sees, and chat widgets that live in embedded frames.
+    @MainActor
+    func testMediaKeyReleaseRunsInThePageWorldOfEveryFrame() {
+        XCTAssertFalse(MediaKeyRelease.userScript.isForMainFrameOnly)
+        let profile = BrowserProfile(name: "Media", symbol: "speaker", tint: .green)
+        let tab = BrowserTab(profileID: profile.id)
+        defer { WebViewPool.shared.discard(tab.id) }
+
+        let scripts = WebViewPool.shared.webView(for: tab, profile: profile).configuration.userContentController.userScripts
+
+        XCTAssertTrue(scripts.contains { $0.source == MediaKeyRelease.scriptSource })
+    }
 }
 
 @MainActor

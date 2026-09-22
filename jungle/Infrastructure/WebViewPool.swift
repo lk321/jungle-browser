@@ -109,6 +109,7 @@ final class WebViewPool {
     private func addUserScripts(to controller: WKUserContentController) {
         controller.addUserScript(WebNotifications.userScript())
         controller.addUserScript(Self.mediaScript)
+        controller.addUserScript(MediaKeyRelease.userScript)
         controller.addUserScript(ScreenShareQuality.userScript)
         controller.addUserScript(JungleWebView.contextMenuScript)
         controller.addUserScript(DeveloperDiagnostics.userScript)
