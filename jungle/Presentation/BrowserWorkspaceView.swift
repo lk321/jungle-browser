@@ -589,9 +589,10 @@ private struct SidebarShortcutHint: View {
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 8)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.14)))
-        .shadow(radius: 10, y: 4)
+        // The window's colour, not a material, for the reason the find bar above it gives.
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.14)))
+        .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
         .accessibilityElement(children: .combine)
     }
 }

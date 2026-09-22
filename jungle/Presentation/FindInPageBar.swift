@@ -62,9 +62,12 @@ struct FindInPageBar: View {
         .padding(.leading, 9)
         .padding(.trailing, 7)
         .padding(.vertical, 5)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().stroke(.white.opacity(0.14)))
-        .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+        // Not a material: a material takes its colour from the page under it, so over a white
+        // page dark chrome turned light grey behind white text, and light chrome dissolved into
+        // the page. The window's own colour is the background the text colour was chosen for.
+        .background(Color(nsColor: .windowBackgroundColor), in: Capsule())
+        .overlay(Capsule().strokeBorder(.primary.opacity(0.14)))
+        .shadow(color: .black.opacity(0.22), radius: 8, y: 2)
         .onAppear(perform: focusField)
         .onChange(of: find.focusRequest) { focusField() }
     }
