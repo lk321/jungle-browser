@@ -24,7 +24,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		C1B4FE3F303CBC7700A3F736 /* jungle.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = jungle.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C1B4FE3F303CBC7700A3F736 /* Jungle.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Jungle.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C1B4FE4C303CBC7A00A3F736 /* jungleTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = jungleTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C1B4FE56303CBC7A00A3F736 /* jungleUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = jungleUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -85,7 +85,7 @@
 		C1B4FE40303CBC7700A3F736 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				C1B4FE3F303CBC7700A3F736 /* jungle.app */,
+				C1B4FE3F303CBC7700A3F736 /* Jungle.app */,
 				C1B4FE4C303CBC7A00A3F736 /* jungleTests.xctest */,
 				C1B4FE56303CBC7A00A3F736 /* jungleUITests.xctest */,
 			);
@@ -114,7 +114,7 @@
 			packageProductDependencies = (
 			);
 			productName = jungle;
-			productReference = C1B4FE3F303CBC7700A3F736 /* jungle.app */;
+			productReference = C1B4FE3F303CBC7700A3F736 /* Jungle.app */;
 			productType = "com.apple.product-type.application";
 		};
 		C1B4FE4B303CBC7A00A3F736 /* jungleTests */ = {
@@ -416,7 +416,8 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = personal.jungle;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_MODULE_NAME = jungle;
+				PRODUCT_NAME = Jungle;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -462,7 +463,8 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = personal.jungle;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_MODULE_NAME = jungle;
+				PRODUCT_NAME = Jungle;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -498,7 +500,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/jungle.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/jungle";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Jungle.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Jungle";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
 			name = Debug;
@@ -524,7 +526,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/jungle.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/jungle";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Jungle.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Jungle";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
 			name = Release;

@@ -152,7 +152,7 @@ jobs:
         run: |
           set -euo pipefail
           archive_path="$RUNNER_TEMP/Jungle.xcarchive"
-          app_path="$archive_path/Products/Applications/jungle.app"
+          app_path="$archive_path/Products/Applications/Jungle.app"
           artifacts_path="$RUNNER_TEMP/artifacts"
           zip_path="$artifacts_path/Jungle-$VERSION-macos-universal.zip"
 
@@ -163,7 +163,7 @@ jobs:
             exit 1
           fi
 
-          architectures="$(lipo -archs "$app_path/Contents/MacOS/jungle")"
+          architectures="$(lipo -archs "$app_path/Contents/MacOS/Jungle")"
           for architecture in arm64 x86_64; do
             if [[ " $architectures " != *" $architecture "* ]]; then
               echo "Missing $architecture slice in the release binary: $architectures" >&2
