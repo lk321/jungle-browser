@@ -2045,6 +2045,39 @@ final class JungleTests: XCTestCase {
         XCTAssertNotEqual(values[2], "native", "registration.showNotification still goes to WebKit")
     }
 
+    /// "Continue with Google" is an `accounts.google.com` frame asking for an
+    /// `accounts.google.com` window, and refusing every embedded frame made the button dead.
+    /// A player frame opening its own domain is still the first hop of a popunder.
+    func testAccountProviderFramesMayOpenOnlyTheirOwnSignInWindow() {
+        XCTAssertTrue(BrowserStore.isAccountProviderWindow(frameHost: "accounts.google.com", destinationHost: "accounts.google.com"))
+        XCTAssertTrue(BrowserStore.isAccountProviderWindow(frameHost: "appleid.apple.com", destinationHost: "appleid.apple.com"))
+        XCTAssertFalse(BrowserStore.isAccountProviderWindow(frameHost: "accounts.google.com", destinationHost: "ads.example"))
+        XCTAssertFalse(BrowserStore.isAccountProviderWindow(frameHost: "player.example", destinationHost: "player.example"))
+        XCTAssertFalse(BrowserStore.isAccountProviderWindow(frameHost: nil, destinationHost: "accounts.google.com"))
+    }
+
+    /// A sign-in window closes itself once done, and the user lands back on the page it signed
+    /// in. A tab the user opened stays, whatever its page asks.
+    @MainActor
+    func testClosingAPopupReturnsToItsOpenerAndOnlyPopupsCloseThemselves() throws {
+        let store = makeStore()
+        store.createTab()
+        let openerTabID = try XCTUnwrap(store.selectedTabID)
+        store.createTab()
+        let otherTabID = try XCTUnwrap(store.selectedTabID)
+        store.select(openerTabID)
+        let popupTabID = try XCTUnwrap(
+            store.openPopupTab(from: openerTabID, address: URL(string: "https://accounts.google.com/gsi/select")!)
+        )
+
+        store.closePopupTab(otherTabID)
+        XCTAssertTrue(store.tabs.contains { $0.id == otherTabID })
+
+        store.closePopupTab(popupTabID)
+        XCTAssertFalse(store.tabs.contains { $0.id == popupTabID })
+        XCTAssertEqual(store.selectedTabID, openerTabID)
+    }
+
     /// A download is written under a working name and renamed once complete, and two downloads
     /// of one name are both told it before either file exists.
     @MainActor

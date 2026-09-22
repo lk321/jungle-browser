@@ -278,7 +278,11 @@ struct BrowserWebView: NSViewRepresentable {
             ), let tabID = tabID(of: webView),
                   store.allowsPopup(
                       from: tabID,
-                      isFromEmbeddedOtherSiteFrame: Self.isEmbeddedOtherSiteFrame(navigationAction.sourceFrame, in: webView),
+                      isFromEmbeddedOtherSiteFrame: Self.isEmbeddedOtherSiteFrame(navigationAction.sourceFrame, in: webView)
+                          && !BrowserStore.isAccountProviderWindow(
+                              frameHost: navigationAction.sourceFrame.securityOrigin.host,
+                              destinationHost: destination.host
+                          ),
                       isLinkActivated: navigationAction.navigationType == .linkActivated
                   ),
                   let popupTabID = store.openPopupTab(from: tabID, address: destination)
@@ -334,6 +338,13 @@ struct BrowserWebView: NSViewRepresentable {
             // so an embedded ad serving a binary never becomes a download.
             let isUnshowableFile = navigationResponse.isForMainFrame && !navigationResponse.canShowMIMEType
             decisionHandler(isAttachment || isUnshowableFile ? .download : .allow)
+        }
+
+        /// A page's `window.close()`: a sign-in window closes itself once it has signed the
+        /// opener in, and the user lands back on the page that opened it.
+        func webViewDidClose(_ webView: WKWebView) {
+            guard let tabID = tabID(of: webView) else { return }
+            store.closePopupTab(tabID)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

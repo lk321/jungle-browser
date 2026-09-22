@@ -239,6 +239,7 @@ final class BrowserStore: ObservableObject {
         closingTabIDs.remove(tabID)
         let profileID = tabs[index].profileID
         let wasSelected = selectedTabID == tabID
+        let openerTabID = popupOpenerTabIDs.removeValue(forKey: tabID)
         tabs.remove(at: index)
         loadingTabIDs.remove(tabID)
         initialContentReadyTabIDs.remove(tabID)
@@ -258,7 +259,9 @@ final class BrowserStore: ObservableObject {
             persistWorkspace()
             return
         }
-        if let replacement = tabs.last(where: { $0.profileID == profileID }) {
+        if let openerTabID, tabs.contains(where: { $0.id == openerTabID }) {
+            select(openerTabID)
+        } else if let replacement = tabs.last(where: { $0.profileID == profileID }) {
             select(replacement.id)
         } else {
             activeProfileID = profileID
@@ -605,6 +608,29 @@ final class BrowserStore: ObservableObject {
         return frameHost.hasSuffix("." + pageHost) || pageHost.hasSuffix("." + frameHost)
     }
 
+    /// Sign-in and payment providers whose buttons are embedded frames opening a window of their
+    /// own: "Continue with Google" on Pinterest is an `accounts.google.com` frame asking for an
+    /// `accounts.google.com` window, and refusing it made the button do nothing at all.
+    ///
+    /// Only these, and only toward their own site. "Any frame may open its own site" is not the
+    /// rule: a player frame opening its own domain is the first hop of a popunder redirect.
+    nonisolated static let accountProviderHosts: Set<String> = [
+        "accounts.google.com",
+        "appleid.apple.com",
+        "facebook.com", "www.facebook.com",
+        "login.microsoftonline.com", "login.live.com",
+        "paypal.com", "www.paypal.com",
+    ]
+
+    nonisolated static func isAccountProviderWindow(frameHost: String?, destinationHost: String?) -> Bool {
+        guard let frameHost = frameHost?.lowercased(), accountProviderHosts.contains(frameHost) else { return false }
+        return isSameSite(frameHost: destinationHost, pageHost: frameHost)
+    }
+
+    /// The tab each popup was opened from, so closing a popup — a sign-in window closing itself
+    /// once done — lands back on the page that opened it.
+    private var popupOpenerTabIDs: [UUID: UUID] = [:]
+
     /// The instant this tab last opened a scripted window, which is what spaces the next one out.
     private var lastScriptedPopupDates: [UUID: Date] = [:]
 
@@ -616,6 +642,13 @@ final class BrowserStore: ObservableObject {
         ) else { return false }
         if !isLinkActivated { lastScriptedPopupDates[sourceTabID] = .now }
         return true
+    }
+
+    /// A page's `window.close()`. Only a window a page opened may close itself; a tab the user
+    /// opened stays, whatever its page asks.
+    func closePopupTab(_ tabID: UUID) {
+        guard popupOpenerTabIDs[tabID] != nil else { return }
+        close(tabID)
     }
 
     /// Closes a tab that only ever existed to carry a download. Its web view never receives a
@@ -640,6 +673,7 @@ final class BrowserStore: ObservableObject {
         )
         tabs.append(tab)
         lastRequestedAddresses[tab.id] = address
+        popupOpenerTabIDs[tab.id] = sourceTabID
         select(tab.id)
         return tab.id
     }
