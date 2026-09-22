@@ -72,10 +72,8 @@ struct BrowserWebView: NSViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, ContextMenuDownloadStarter {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, ContextMenuDownloadStarter {
         let store: BrowserStore
-        private var downloadIDs: [ObjectIdentifier: UUID] = [:]
-        private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
         /// Whether a prompt to open another app is on screen. Asks that arrive meanwhile are
         /// dropped, not queued: a page firing the same app link in a loop would otherwise
         /// stack one alert behind another.
@@ -328,13 +326,14 @@ struct BrowserWebView: NSViewRepresentable {
             decidePolicyFor navigationResponse: WKNavigationResponse,
             decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
         ) {
-            guard let response = navigationResponse.response as? HTTPURLResponse,
-                  response.value(forHTTPHeaderField: "Content-Disposition")?.localizedCaseInsensitiveContains("attachment") == true
-            else {
-                decisionHandler(.allow)
-                return
-            }
-            decisionHandler(.download)
+            let isAttachment = (navigationResponse.response as? HTTPURLResponse)?
+                .value(forHTTPHeaderField: "Content-Disposition")?
+                .localizedCaseInsensitiveContains("attachment") == true
+            // A disk image or an archive served without `attachment` is still a file: allowed as
+            // a page, WebKit has nothing to show and the navigation fails. Only the main frame's,
+            // so an embedded ad serving a binary never becomes a download.
+            let isUnshowableFile = navigationResponse.isForMainFrame && !navigationResponse.canShowMIMEType
+            decisionHandler(isAttachment || isUnshowableFile ? .download : .allow)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -367,42 +366,6 @@ struct BrowserWebView: NSViewRepresentable {
             store.closeTabOpenedForDownload(tabID)
         }
 
-        func download(
-            _ download: WKDownload,
-            decideDestinationUsing response: URLResponse,
-            suggestedFilename: String,
-            completionHandler: @escaping (URL?) -> Void
-        ) {
-            guard let downloadID = downloadIDs[ObjectIdentifier(download)] else {
-                completionHandler(nil)
-                return
-            }
-            completionHandler(
-                store.prepareDownloadDestination(
-                    for: downloadID,
-                    suggestedFileName: suggestedFilename,
-                    expectedBytes: response.expectedContentLength
-                )
-            )
-        }
-
-        func download(_ download: WKDownload, didReceiveDataOfLength length: Int) {
-            guard let downloadID = downloadIDs[ObjectIdentifier(download)] else { return }
-            store.recordDownloadData(Int64(length), for: downloadID)
-        }
-
-        func downloadDidFinish(_ download: WKDownload) {
-            activeDownloads.removeValue(forKey: ObjectIdentifier(download))
-            guard let downloadID = downloadIDs.removeValue(forKey: ObjectIdentifier(download)) else { return }
-            store.finishDownload(downloadID)
-        }
-
-        func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-            activeDownloads.removeValue(forKey: ObjectIdentifier(download))
-            guard let downloadID = downloadIDs.removeValue(forKey: ObjectIdentifier(download)) else { return }
-            store.failDownload(downloadID, errorDescription: error.localizedDescription)
-        }
-
         /// WebKit's own context-menu download never reaches the app, so the menu item hands
         /// the address back here and the download is started over public API instead.
         func startDownload(from address: URL, in webView: WKWebView) {
@@ -414,13 +377,7 @@ struct BrowserWebView: NSViewRepresentable {
 
         private func configure(download: WKDownload, sourceAddress: URL?, tabID: UUID?) {
             guard let tabID = tabID ?? store.selectedTabID else { return }
-            let sourceAddress = sourceAddress ?? BrowserAddress.home
-            let downloadID = store.beginDownload(for: tabID, sourceAddress: sourceAddress)
-            downloadIDs[ObjectIdentifier(download)] = downloadID
-            // `WKDownload` holds its delegate and its web view weakly and nothing else keeps it
-            // alive, so closing the tab it came from would otherwise cancel the transfer.
-            activeDownloads[ObjectIdentifier(download)] = download
-            download.delegate = self
+            FileDownloads.shared.track(download, store: store, tabID: tabID, sourceAddress: sourceAddress ?? BrowserAddress.home)
         }
     }
 }

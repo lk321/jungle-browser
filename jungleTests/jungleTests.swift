@@ -2045,6 +2045,37 @@ final class JungleTests: XCTestCase {
         XCTAssertNotEqual(values[2], "native", "registration.showNotification still goes to WebKit")
     }
 
+    /// A download is written under a working name and renamed once complete, and two downloads
+    /// of one name are both told it before either file exists.
+    @MainActor
+    func testDownloadNamesSkipFilesPartialsAndReservations() {
+        let directory = URL(fileURLWithPath: "/Downloads")
+        let taken: Set<String> = ["Setup.dmg", "Setup 2.dmg"]
+        let destination = BrowserStore.availableDestination(for: "Setup.dmg", in: directory) {
+            taken.contains($0.lastPathComponent)
+        }
+        XCTAssertEqual(destination.lastPathComponent, "Setup 3.dmg")
+        XCTAssertEqual(BrowserDownload.partialDestination(for: destination).lastPathComponent, "Setup 3.dmg.download")
+    }
+
+    /// Nothing carries a transfer across a relaunch, so a download still marked as running
+    /// would read "Downloading" forever.
+    @MainActor
+    func testDownloadsLeftRunningByTheLastSessionAreInterrupted() throws {
+        let persistence = try BrowserPersistence(testingInMemory: true)
+        let running = BrowserDownload(
+            profileID: UUID(),
+            sourceAddress: URL(string: "https://example.com/Setup.dmg")!,
+            fileName: "Setup.dmg"
+        )
+        persistence.saveDownload(running)
+
+        let store = BrowserStore(persistence: persistence)
+
+        XCTAssertEqual(store.downloads.first { $0.id == running.id }?.state, .failed)
+        XCTAssertEqual(persistence.loadDownloads().first { $0.id == running.id }?.state, .failed)
+    }
+
     /// The release has to reach sounds made with `new Audio()`, which only the page's world
     /// sees, and chat widgets that live in embedded frames.
     @MainActor

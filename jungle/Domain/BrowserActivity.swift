@@ -74,4 +74,9 @@ struct BrowserDownload: Identifiable, Equatable {
         self.state = state
         self.failureDescription = failureDescription
     }
+    /// Where a file is written while it downloads: `Name.dmg.download`, renamed to `Name.dmg`
+    /// once complete, so nothing opens a file that is still arriving.
+    static func partialDestination(for destination: URL) -> URL {
+        destination.appendingPathExtension("download")
+    }
 }

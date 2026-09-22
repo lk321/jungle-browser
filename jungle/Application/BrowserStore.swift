@@ -128,6 +128,7 @@ final class BrowserStore: ObservableObject {
                 }
             }
         resolvedExtensionRuntime.start()
+        interruptStaleDownloads()
     }
 
     deinit {
@@ -692,25 +693,37 @@ final class BrowserStore: ObservableObject {
         return download.id
     }
 
+    /// The name a download will have once complete. A name is taken by a file, by the partial
+    /// file of a download on its way, and by a download not yet written at all: two downloads
+    /// of one name are both told it before either file exists.
     func prepareDownloadDestination(for downloadID: UUID, suggestedFileName: String, expectedBytes: Int64?) -> URL? {
         guard let index = downloads.firstIndex(where: { $0.id == downloadID }) else { return nil }
         let fileName = sanitizedFileName(suggestedFileName)
         guard let downloadsDirectory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return nil }
-        let destination = availableDestination(for: fileName, in: downloadsDirectory)
+        let reserved = Set(downloads.filter { $0.state == .inProgress }.compactMap(\.destination))
+        let destination = Self.availableDestination(for: fileName, in: downloadsDirectory) { candidate in
+            reserved.contains(candidate)
+                || FileManager.default.fileExists(atPath: candidate.path)
+                || FileManager.default.fileExists(atPath: BrowserDownload.partialDestination(for: candidate).path)
+        }
         downloads[index].fileName = destination.lastPathComponent
         downloads[index].destination = destination
-        downloads[index].expectedBytes = expectedBytes.flatMap { $0 > 0 ? $0 : nil }
+        if let expectedBytes, expectedBytes > 0 { downloads[index].expectedBytes = expectedBytes }
         persistence.saveDownload(downloads[index])
         return destination
     }
 
-    func recordDownloadData(_ byteCount: Int64, for downloadID: UUID) {
+    /// Only a change is written: every write redraws the window.
+    func recordDownloadProgress(receivedBytes: Int64, expectedBytes: Int64?, for downloadID: UUID) {
         guard let index = downloads.firstIndex(where: { $0.id == downloadID }) else { return }
-        downloads[index].receivedBytes += byteCount
+        if downloads[index].receivedBytes != receivedBytes { downloads[index].receivedBytes = receivedBytes }
+        if let expectedBytes, downloads[index].expectedBytes != expectedBytes { downloads[index].expectedBytes = expectedBytes }
     }
 
-    func finishDownload(_ downloadID: UUID) {
+    func finishDownload(_ downloadID: UUID, at destination: URL) {
         guard let index = downloads.firstIndex(where: { $0.id == downloadID }) else { return }
+        downloads[index].destination = destination
+        downloads[index].fileName = destination.lastPathComponent
         downloads[index].state = .completed
         downloads[index].completedAt = .now
         downloads[index].failureDescription = nil
@@ -723,6 +736,21 @@ final class BrowserStore: ObservableObject {
         downloads[index].completedAt = .now
         downloads[index].failureDescription = errorDescription
         persistence.saveDownload(downloads[index])
+    }
+
+    /// A download still marked as running when the app starts died with the last session:
+    /// nothing carries a transfer across a relaunch, and its partial file cannot be resumed.
+    private func interruptStaleDownloads() {
+        for index in downloads.indices where downloads[index].state == .inProgress {
+            // A reopened window builds a new store while the transfers of the old one run on.
+            guard !FileDownloads.shared.isRunning(downloads[index].id) else { continue }
+            if let destination = downloads[index].destination {
+                try? FileManager.default.removeItem(at: BrowserDownload.partialDestination(for: destination))
+            }
+            downloads[index].state = .failed
+            downloads[index].failureDescription = "Jungle quit before the download finished."
+            persistence.saveDownload(downloads[index])
+        }
     }
 
     func deleteDownload(_ downloadID: UUID) {
@@ -1320,17 +1348,16 @@ final class BrowserStore: ObservableObject {
         return trimmedName.isEmpty ? "Download" : trimmedName
     }
 
-    private func availableDestination(for fileName: String, in directory: URL) -> URL {
-        let fileManager = FileManager.default
+    static func availableDestination(for fileName: String, in directory: URL, isTaken: (URL) -> Bool) -> URL {
         let fileURL = directory.appendingPathComponent(fileName)
-        guard fileManager.fileExists(atPath: fileURL.path) else { return fileURL }
+        guard isTaken(fileURL) else { return fileURL }
 
         let baseName = fileURL.deletingPathExtension().lastPathComponent
         let fileExtension = fileURL.pathExtension
         for index in 2...10_000 {
             let candidateName = fileExtension.isEmpty ? "\(baseName) \(index)" : "\(baseName) \(index).\(fileExtension)"
             let candidate = directory.appendingPathComponent(candidateName)
-            if !fileManager.fileExists(atPath: candidate.path) { return candidate }
+            if !isTaken(candidate) { return candidate }
         }
         return directory.appendingPathComponent("\(UUID().uuidString)-\(fileName)")
     }
