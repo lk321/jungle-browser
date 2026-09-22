@@ -219,7 +219,10 @@ struct BrowserWorkspaceView: View {
                         .accessibilityHidden(true)
                 }
                 .overlay(alignment: .topTrailing) {
-                    FindInPageOverlay(store: store)
+                    FindInPageOverlay(
+                        store: store,
+                        sidebarShortcutHint: store.isSidebarShortcutHintVisible ? store.isSidebarVisible : nil
+                    )
                 }
                 .animation(.easeOut(duration: 0.16), value: store.isSelectedTabLoading)
                 .animation(.easeOut(duration: 0.16), value: store.copiedTabAddress)
@@ -538,25 +541,58 @@ private struct CopiedAddressFeedback: View {
 }
 
 /// Observes the find session on its own, so each keystroke redraws the bar and not the page.
+/// The page's top-right corner: the find bar, and under it the ⌘B hint.
 private struct FindInPageOverlay: View {
     let store: BrowserStore
+    /// Whether the sidebar is showing, while the hint is up; nil when it is not.
+    let sidebarShortcutHint: Bool?
     @ObservedObject private var find: FindInPage
 
-    init(store: BrowserStore) {
+    init(store: BrowserStore, sidebarShortcutHint: Bool?) {
         self.store = store
+        self.sidebarShortcutHint = sidebarShortcutHint
         find = store.findInPage
     }
 
     var body: some View {
-        ZStack {
+        VStack(alignment: .trailing, spacing: 8) {
             if find.isPresented {
                 FindInPageBar(find: find, dismiss: store.dismissFindInPage)
-                    .padding(.top, ContentHeaderDragArea.height + 4)
-                    .padding(.trailing, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            if let sidebarIsVisible = sidebarShortcutHint {
+                SidebarShortcutHint(hidesSidebar: sidebarIsVisible)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .padding(.top, ContentHeaderDragArea.height + 4)
+        .padding(.trailing, 8)
         .animation(.spring(duration: 0.24, bounce: 0.18), value: find.isPresented)
+        .animation(.spring(duration: 0.24, bounce: 0.18), value: sidebarShortcutHint)
+    }
+}
+
+private struct SidebarShortcutHint: View {
+    let hidesSidebar: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sidebar.left")
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Press \(Text("⌘B").fontWeight(.bold)) again to \(hidesSidebar ? "hide" : "show") the sidebar")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                Text("This page uses ⌘B for itself")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.14)))
+        .shadow(radius: 10, y: 4)
+        .accessibilityElement(children: .combine)
     }
 }
 

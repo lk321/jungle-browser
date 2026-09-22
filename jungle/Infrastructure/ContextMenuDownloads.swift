@@ -20,6 +20,48 @@ final class JungleWebView: WKWebView {
     var observations: [NSKeyValueObservation] = []
     /// What the pointer was over when the page last raised a context menu, by menu item.
     fileprivate var contextMenuDownloads: [String: URL] = [:]
+    /// Whether ⌘B should skip the page and go straight to the sidebar: true right after the
+    /// page kept one for itself and the browser offered the second press.
+    var sidebarShortcutIsArmed: () -> Bool = { false }
+    /// Called once WebKit has heard back from the page about a ⌘B, with when it was pressed.
+    /// The key never reaching the menu by then means the page kept it.
+    var sidebarShortcutReachedPage: (Date) -> Void = { _ in }
+    /// The ⌘B the page has but has not answered for yet.
+    private var pendingSidebarShortcut: NSEvent?
+
+    /// ⌘B toggles the sidebar, and editors use it for bold. WebKit hands the key to the page
+    /// first and only sends it on to the menu if the page leaves it alone, so on a page that
+    /// takes it the sidebar never heard of the press. The browser then offers the second press,
+    /// which bypasses the page.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard modifiers == .command, event.charactersIgnoringModifiers?.lowercased() == "b", !event.isARepeat
+        else { return super.performKeyEquivalent(with: event) }
+        // The same event coming back is WebKit sending it on to the menu: the page left it alone.
+        if event === pendingSidebarShortcut {
+            pendingSidebarShortcut = nil
+            return super.performKeyEquivalent(with: event)
+        }
+        if sidebarShortcutIsArmed() {
+            NotificationCenter.default.post(name: .jungleToggleSidebar, object: nil)
+            return true
+        }
+        // False: the page is not in focus, so the menu has it already.
+        guard super.performKeyEquivalent(with: event) else { return false }
+        let pressedAt = Date.now
+        // ponytail: WebKit's private hook, the one that runs once the page has answered for every
+        // key sent so far. Without it there is no hint, and ⌘B behaves exactly as it did before.
+        let afterPendingKeys = NSSelectorFromString("_doAfterProcessingAllPendingKeyEvents:")
+        guard responds(to: afterPendingKeys) else { return true }
+        pendingSidebarShortcut = event
+        let reached: @convention(block) () -> Void = { [weak self] in
+            guard let self, self.pendingSidebarShortcut === event else { return }
+            self.pendingSidebarShortcut = nil
+            self.sidebarShortcutReachedPage(pressedAt)
+        }
+        perform(afterPendingKeys, with: reached as AnyObject)
+        return true
+    }
 
     static let downloadItemIdentifiers: Set<String> = [
         "WKMenuItemIdentifierDownloadImage",

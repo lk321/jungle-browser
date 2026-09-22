@@ -89,6 +89,12 @@ struct BrowserWebView: NSViewRepresentable {
             if webView.navigationDelegate !== self { webView.navigationDelegate = self }
             if webView.uiDelegate !== self { webView.uiDelegate = self }
             (webView as? JungleWebView)?.downloadStarter = self
+            if let webView = webView as? JungleWebView {
+                webView.sidebarShortcutIsArmed = { [weak store] in store?.isSidebarShortcutHintVisible == true }
+                webView.sidebarShortcutReachedPage = { [weak store] pressedAt in
+                    store?.sidebarShortcutReachedPage(in: tabID, pressedAt: pressedAt)
+                }
+            }
             // The observations are kept on the view, so a view that has them is already
             // observed, and they go away with it when its tab closes or sleeps.
             guard let webView = webView as? JungleWebView, webView.observations.isEmpty else { return }

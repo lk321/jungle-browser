@@ -21,6 +21,10 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var copiedScreenshotTabID: UUID?
     /// The zoom just applied to the selected tab, while its badge is on screen. `nil` hides it.
     @Published private(set) var pageZoomFeedback: Double?
+    /// "Press ⌘B again": the page on screen kept ⌘B for itself, so the next one goes to the sidebar.
+    @Published private(set) var isSidebarShortcutHintVisible = false
+    private var sidebarShortcutHintTask: Task<Void, Never>?
+    private var sidebarToggledAt: Date = .distantPast
     /// The failure each tab's last navigation ended in, for as long as nothing has loaded over it.
     @Published private(set) var navigationFailures: [UUID: NavigationFailure] = [:]
     @Published private(set) var developerMetricsByTabID: [UUID: DeveloperMetrics] = [:]
@@ -133,6 +137,7 @@ final class BrowserStore: ObservableObject {
         copiedAddressFeedbackTask?.cancel()
         copiedScreenshotFeedbackTask?.cancel()
         pageZoomFeedbackTask?.cancel()
+        sidebarShortcutHintTask?.cancel()
         closingTabTasks.values.forEach { $0.cancel() }
         revealDeadlineTasks.values.forEach { $0.cancel() }
         persistWorkspaceTask?.cancel()
@@ -212,6 +217,7 @@ final class BrowserStore: ObservableObject {
             // The badge belongs to the tab it was raised over, not to the one arriving.
             pageZoomFeedbackTask?.cancel()
             pageZoomFeedback = nil
+            dismissSidebarShortcutHint()
             previouslySelectedTabID = previousTabID
             // Idle time is measured from when a tab stopped being selected, not from when it
             // was last selected: stamping only the arriving tab left the one being left behind
@@ -343,7 +349,28 @@ final class BrowserStore: ObservableObject {
     }
 
     func toggleSidebar() {
+        sidebarToggledAt = .now
+        dismissSidebarShortcutHint()
         isSidebarVisible.toggle()
+    }
+
+    /// WebKit has the page's answer to a ⌘B. A toggle since the press means the page let it
+    /// through to the menu; none means the page kept it, and the next press is offered instead.
+    func sidebarShortcutReachedPage(in tabID: UUID, pressedAt: Date) {
+        guard tabID == selectedTabID, sidebarToggledAt < pressedAt else { return }
+        isSidebarShortcutHintVisible = true
+        sidebarShortcutHintTask?.cancel()
+        sidebarShortcutHintTask = Task { [weak self] in
+            // Long enough to read the hint and press again; the second press works for as long as it shows.
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.isSidebarShortcutHintVisible = false
+        }
+    }
+
+    private func dismissSidebarShortcutHint() {
+        sidebarShortcutHintTask?.cancel()
+        isSidebarShortcutHintVisible = false
     }
 
     func importChromeExtension() {

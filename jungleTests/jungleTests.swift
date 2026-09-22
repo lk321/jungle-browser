@@ -98,6 +98,74 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(underPressure.map(\.id), [idle.id, pinned.id, quickAccess.id])
     }
 
+    /// The hint shows only when ⌘B never reached the menu: a toggle after the press means the
+    /// page let it through. Toggling, or leaving the tab, takes the hint down.
+    @MainActor
+    func testSidebarShortcutHintShowsOnlyWhenThePageKeptTheKey() throws {
+        let store = BrowserStore(persistence: try BrowserPersistence(testingInMemory: true))
+        let tabID = try XCTUnwrap(store.selectedTabID)
+
+        let letThrough = Date.now
+        store.toggleSidebar()
+        store.sidebarShortcutReachedPage(in: tabID, pressedAt: letThrough)
+        XCTAssertFalse(store.isSidebarShortcutHintVisible)
+
+        store.sidebarShortcutReachedPage(in: UUID(), pressedAt: .now)
+        XCTAssertFalse(store.isSidebarShortcutHintVisible)
+
+        store.sidebarShortcutReachedPage(in: tabID, pressedAt: .now)
+        XCTAssertTrue(store.isSidebarShortcutHintVisible)
+
+        let wasVisible = store.isSidebarVisible
+        store.toggleSidebar()
+        XCTAssertFalse(store.isSidebarShortcutHintVisible)
+        XCTAssertNotEqual(store.isSidebarVisible, wasVisible)
+    }
+
+    /// Against real WebKit: a page that takes ⌘B is reported once the page has answered, and
+    /// the armed second press goes to the sidebar without the page ever seeing it.
+    @MainActor
+    func testSidebarShortcutIsReportedWhenThePageKeepsItAndBypassesThePageWhenArmed() async throws {
+        let configuration = WKWebViewConfiguration()
+        let pageKeys = PageKeyMessages()
+        configuration.userContentController.add(pageKeys, name: "keys")
+        let webView = JungleWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: configuration)
+        let window = NSWindow(contentRect: webView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView?.addSubview(webView)
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<body contenteditable>text<script>addEventListener('keydown', e => { if (e.metaKey && e.key === 'b') { e.preventDefault(); webkit.messageHandlers.keys.postMessage('b'); } });</script>",
+            baseURL: URL(string: "https://bold.jungle.test")
+        )
+        await fulfillment(of: [navigation.finished], timeout: 5)
+        window.makeFirstResponder(webView)
+
+        let reached = expectation(description: "The page answered the key")
+        webView.sidebarShortcutReachedPage = { _ in reached.fulfill() }
+        XCTAssertTrue(webView.performKeyEquivalent(with: try Self.commandB(in: window)))
+        await fulfillment(of: [reached], timeout: 5)
+        XCTAssertEqual(pageKeys.count, 1)
+
+        webView.sidebarShortcutIsArmed = { true }
+        webView.sidebarShortcutReachedPage = { _ in XCTFail("An armed press must not go to the page") }
+        let toggled = expectation(forNotification: .jungleToggleSidebar, object: nil)
+        XCTAssertTrue(webView.performKeyEquivalent(with: try Self.commandB(in: window)))
+        await fulfillment(of: [toggled], timeout: 1)
+        _ = try await webView.evaluateJavaScript("1")
+        XCTAssertEqual(pageKeys.count, 1)
+    }
+
+    private static func commandB(in window: NSWindow) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .command, timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil, characters: "b", charactersIgnoringModifiers: "b",
+            isARepeat: false, keyCode: 11
+        ))
+    }
+
     @MainActor
     func testMemoryPressureShortensTheSleepDelay() {
         XCTAssertEqual(BrowserStore.sleepDelay(interval: 900, pressure: .normal), 900)
@@ -1926,6 +1994,14 @@ private final class NavigationCompletion: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         finished.fulfill()
+    }
+}
+
+private final class PageKeyMessages: NSObject, WKScriptMessageHandler {
+    private(set) var count = 0
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        count += 1
     }
 }
 
