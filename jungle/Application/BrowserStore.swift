@@ -421,7 +421,10 @@ final class BrowserStore: ObservableObject {
 
     func openExternalURL(_ url: URL) {
         guard BrowserAddress.isWebURL(url) else { return }
-        navigate(to: url.absoluteString)
+        // A link from another app is a new page, never a replacement for the one being read.
+        let tab = BrowserTab(profileID: activeProfileID, address: url, title: url.host ?? url.absoluteString)
+        tabs.append(tab)
+        select(tab.id)
     }
 
     func reloadSelectedTab() {

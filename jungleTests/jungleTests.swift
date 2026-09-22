@@ -922,6 +922,23 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(store.selectedTabID, thirdTabID)
     }
 
+    /// A link opened from another app (the terminal, Mail) gets its own tab and leaves the
+    /// page the user was on where it was.
+    @MainActor
+    func testExternalLinkOpensInNewTabWithoutReplacingSelectedOne() throws {
+        let store = makeStore()
+        let previousTab = try XCTUnwrap(store.selectedTab)
+        let initialTabCount = store.tabs.count
+        let destination = try XCTUnwrap(URL(string: "https://example.com/from-terminal"))
+
+        store.openExternalURL(destination)
+
+        XCTAssertEqual(store.tabs.count, initialTabCount + 1)
+        XCTAssertNotEqual(store.selectedTabID, previousTab.id)
+        XCTAssertEqual(store.selectedTab?.address, destination)
+        XCTAssertEqual(store.tabs.first(where: { $0.id == previousTab.id })?.address, previousTab.address)
+    }
+
     @MainActor
     func testSavesOpenTabToQuickAccessWithoutCreatingAnotherTab() throws {
         let store = makeStore()
