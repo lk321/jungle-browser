@@ -2109,6 +2109,43 @@ final class JungleTests: XCTestCase {
         XCTAssertEqual(persistence.loadDownloads().first { $0.id == running.id }?.state, .failed)
     }
 
+    /// A key the page read without `preventDefault` comes back unhandled and used to end in the
+    /// system beep on every press. Only keys typed into a page stop at the end of the chain; a ⌘
+    /// shortcut nothing answered still gets its beep.
+    @MainActor
+    func testKeysTypedIntoAPageNeverReachTheBeepButUnansweredShortcutsDo() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+        let webView = WKWebView(frame: window.contentView?.bounds ?? .zero)
+        window.contentView?.addSubview(webView)
+        XCTAssertTrue(window.makeFirstResponder(webView))
+        WebKeyPressSink.install(in: window)
+        WebKeyPressSink.install(in: window)
+        let beep = BeepRecorder()
+        WebKeyPressSink.shared.nextResponder = beep
+        defer { WebKeyPressSink.shared.nextResponder = nil }
+
+        func press(_ characters: String, _ modifiers: NSEvent.ModifierFlags) throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 0
+            ))
+            WebKeyPressSink.shared.keyDown(with: event)
+        }
+
+        try press("\u{F703}", [.function, .numericPad])
+        try press(" ", [])
+        XCTAssertEqual(beep.keys, [])
+        try press("k", .command)
+        XCTAssertEqual(beep.keys, ["k"])
+
+        var chainLength = 0
+        var responder: NSResponder? = window
+        while let current = responder, current !== WebKeyPressSink.shared { chainLength += 1; responder = current.nextResponder }
+        XCTAssertNotNil(responder, "the sink sits in the window's chain, once")
+        XCTAssertGreaterThan(chainLength, 0)
+    }
+
     /// The release has to reach sounds made with `new Audio()`, which only the page's world
     /// sees, and chat widgets that live in embedded frames.
     @MainActor
@@ -2158,6 +2195,11 @@ private final class PageKeyMessages: NSObject, WKScriptMessageHandler {
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         count += 1
     }
+}
+
+private final class BeepRecorder: NSResponder {
+    private(set) var keys: [String] = []
+    override func keyDown(with event: NSEvent) { keys.append(event.charactersIgnoringModifiers ?? "") }
 }
 
 private final class DiscardedMessages: NSObject, WKScriptMessageHandler {

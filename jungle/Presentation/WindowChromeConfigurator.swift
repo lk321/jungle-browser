@@ -21,6 +21,7 @@ private final class WindowChromeView: NSView {
         guard let window else { return }
         Self.configure(window, trafficLightsVisible: trafficLightsVisible)
         installKeyboardMonitor(for: window)
+        WebKeyPressSink.install(in: window)
         visibilityObserver = NotificationCenter.default.addObserver(
             forName: .jungleTrafficLightsVisibility,
             object: nil,
