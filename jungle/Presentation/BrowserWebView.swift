@@ -163,13 +163,6 @@ struct BrowserWebView: NSViewRepresentable {
         ///
         /// ponytail: the answer is never remembered, same as in Chrome and Safari — sharing a
         /// screen is the one permission worth asking for every single time.
-        ///
-        /// Known gap: WebKit answers `respondsToSelector:` for this method and the
-        /// `screenCaptureEnabled` preference is on, yet a sandboxed build never sees the call —
-        /// `getDisplayMedia` stalls inside the web process with no permission request, no
-        /// prompt and no rejection. Camera and microphone go through the public delegate on the
-        /// same build. Next step is a throwaway unsandboxed build to confirm the App Sandbox is
-        /// what swallows it.
         @objc(_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:)
         func requestDisplayCapturePermission(
             _ webView: WKWebView,

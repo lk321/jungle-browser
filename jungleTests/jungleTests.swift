@@ -1296,9 +1296,50 @@ final class JungleTests: XCTestCase {
         XCTAssertTrue(scripts.contains { $0.source == YouTubeAdBlocking.scriptSource })
         XCTAssertTrue(scripts.contains { $0.source == YouTubeAdBlocking.playerScriptSource })
         XCTAssertTrue(scripts.contains { $0.source == WebViewPool.mediaScript.source })
+        XCTAssertTrue(scripts.contains { $0.source == ScreenShareQuality.scriptSource })
 
         WebViewPool.shared.discard(tab.id)
         try? await WKWebsiteDataStore.remove(forIdentifier: profile.dataStoreID)
+    }
+
+    /// A shared screen is sent as text: WebKit's mock screen comes back marked `detail` and
+    /// held at full resolution on the sender, the page's own size limit still stands, and a
+    /// camera next to it keeps adapting the way it always did.
+    @MainActor
+    func testScreenShareKeepsResolutionWithoutTouchingTheCamera() async throws {
+        let configuration = WKWebViewConfiguration()
+        for key in ["mediaDevicesEnabled", "peerConnectionEnabled", "screenCaptureEnabled", "mockCaptureDevicesEnabled"] {
+            configuration.preferences.setValue(true, forKey: key)
+        }
+        configuration.preferences.setValue(false, forKey: "mockCaptureDevicesPromptEnabled")
+        configuration.userContentController.addUserScript(ScreenShareQuality.userScript)
+        let webView = WKWebView(frame: .init(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
+        // WebKit only captures for a page that is on screen and focused.
+        let window = NSWindow(contentRect: webView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = webView
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        let permissions = GrantingCapturePermissions()
+        webView.uiDelegate = permissions
+        let navigation = NavigationCompletion()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString("<!doctype html><body></body>", baseURL: URL(string: "https://example.com/"))
+        await fulfillment(of: [navigation.finished], timeout: 10)
+
+        // Each capture is its own call, because each one spends the user gesture it came with.
+        let steps = [
+            "window.r = {}; window.pc = new RTCPeerConnection(); const t = (await navigator.mediaDevices.getDisplayMedia({video: {width: {max: 1280}}})).getVideoTracks()[0]; const s = pc.addTrack(t); r.screen = [t.getSettings().width, t.contentHint, s.getParameters().degradationPreference];",
+            "const t = (await navigator.mediaDevices.getDisplayMedia()).getVideoTracks()[0]; const s = pc.addTransceiver('video').sender; await s.replaceTrack(t.clone()); r.replaced = [s.track.contentHint, s.getParameters().degradationPreference];",
+            "const t = (await navigator.mediaDevices.getUserMedia({video: true})).getVideoTracks()[0]; const s = pc.addTrack(t); r.camera = [t.contentHint, s.getParameters().degradationPreference ?? null]; return JSON.stringify(r);"
+        ]
+        var result: Any?
+        for step in steps { result = try await webView.callAsyncJavaScript(step, contentWorld: .page) }
+
+        XCTAssertEqual(
+            result as? String,
+            #"{"screen":[1280,"detail","maintain-resolution"],"replaced":["detail","maintain-resolution"],"camera":["",null]}"#
+        )
     }
 
     /// The two halves of an anti-adblock page: the detector that reports the blocker, and the
@@ -2012,6 +2053,25 @@ private final class NavigationCompletion: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         finished.fulfill()
     }
+}
+
+private final class GrantingCapturePermissions: NSObject, WKUIDelegate {
+    @objc(_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:)
+    func requestDisplayCapturePermission(
+        _ webView: WKWebView,
+        origin: WKSecurityOrigin,
+        initiatedByFrame frame: WKFrameInfo,
+        withSystemAudio: Bool,
+        decisionHandler: @escaping (Int) -> Void
+    ) { decisionHandler(1) }
+
+    func webView(
+        _ webView: WKWebView,
+        requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+        initiatedByFrame frame: WKFrameInfo,
+        type: WKMediaCaptureType,
+        decisionHandler: @escaping (WKPermissionDecision) -> Void
+    ) { decisionHandler(.grant) }
 }
 
 private final class PageKeyMessages: NSObject, WKScriptMessageHandler {
