@@ -122,6 +122,23 @@ final class JungleTests: XCTestCase {
         XCTAssertNotEqual(store.isSidebarVisible, wasVisible)
     }
 
+    /// A new download raises its badge, and clicking the badge trades it for Downloads.
+    @MainActor
+    func testStartingADownloadRaisesItsBadgeUntilDownloadsOpens() throws {
+        let store = BrowserStore(persistence: try BrowserPersistence(testingInMemory: true))
+        let tabID = try XCTUnwrap(store.selectedTabID)
+        XCTAssertNil(store.startedDownloadID)
+
+        let first = store.beginDownload(for: tabID, sourceAddress: try XCTUnwrap(URL(string: "https://example.com/a.zip")))
+        XCTAssertEqual(store.startedDownloadID, first)
+        let second = store.beginDownload(for: tabID, sourceAddress: try XCTUnwrap(URL(string: "https://example.com/b.zip")))
+        XCTAssertEqual(store.startedDownloadID, second)
+
+        store.showStartedDownload()
+        XCTAssertNil(store.startedDownloadID)
+        XCTAssertTrue(store.isDownloadsPresented)
+    }
+
     /// Against real WebKit: a page that takes ⌘B is reported once the page has answered, and
     /// the armed second press goes to the sidebar without the page ever seeing it.
     @MainActor

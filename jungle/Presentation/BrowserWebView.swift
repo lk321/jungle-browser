@@ -221,8 +221,7 @@ struct BrowserWebView: NSViewRepresentable {
                BrowserAddress.opensInAnotherApp(address),
                let targetFrame = navigationAction.targetFrame {
                 decisionHandler(.cancel)
-                // An embedded frame reaching for an app on its own is an ad, not the page.
-                guard targetFrame.isMainFrame || navigationAction.navigationType == .linkActivated else { return }
+                guard Self.mayOpenAnotherApp(navigationAction, in: webView) else { return }
                 askToOpenInAnotherApp(address, from: webView)
                 // A tab opened only to bounce to the app never gets a document; same cleanup
                 // as a tab opened only to carry a download.
@@ -267,7 +266,7 @@ struct BrowserWebView: NSViewRepresentable {
             // An app link never gets a tab: it would stay blank once the app took the address.
             // It is settled before the popup checks so it does not spend the tab's popup budget.
             if let address = navigationAction.request.url, BrowserAddress.opensInAnotherApp(address) {
-                if navigationAction.sourceFrame.isMainFrame || navigationAction.navigationType == .linkActivated {
+                if Self.mayOpenAnotherApp(navigationAction, in: webView) {
                     askToOpenInAnotherApp(address, from: webView)
                 }
                 return nil
@@ -290,6 +289,15 @@ struct BrowserWebView: NSViewRepresentable {
             let popup = WebViewPool.shared.adoptPopup(configuration: configuration, for: popupTabID)
             attach(to: popup, tabID: popupTabID)
             return popup
+        }
+
+        /// Whether the page, and not an ad embedded in it, is reaching for another app. What
+        /// counts is the frame that asked: Zoom's launcher, like many, loads the app link into a
+        /// hidden frame of its own, so judging by the frame being navigated dropped every one of
+        /// them without a word. A frame from another site reaching for an app unclicked is an ad.
+        private static func mayOpenAnotherApp(_ navigationAction: WKNavigationAction, in webView: WKWebView) -> Bool {
+            navigationAction.navigationType == .linkActivated
+                || !isEmbeddedOtherSiteFrame(navigationAction.sourceFrame, in: webView)
         }
 
         /// Whether the window was asked for by a frame embedded from another site, rather than

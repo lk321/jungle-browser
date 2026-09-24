@@ -21,6 +21,9 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var copiedScreenshotTabID: UUID?
     /// The zoom just applied to the selected tab, while its badge is on screen. `nil` hides it.
     @Published private(set) var pageZoomFeedback: Double?
+    /// The download whose "started" badge is on screen. An id, not a name: the file only gets
+    /// its real name once WebKit has the response, and the badge reads it live from `downloads`.
+    @Published private(set) var startedDownloadID: UUID?
     /// "Press ⌘B again": the page on screen kept ⌘B for itself, so the next one goes to the sidebar.
     @Published private(set) var isSidebarShortcutHintVisible = false
     private var sidebarShortcutHintTask: Task<Void, Never>?
@@ -62,6 +65,7 @@ final class BrowserStore: ObservableObject {
     private var copiedAddressFeedbackTask: Task<Void, Never>?
     private var copiedScreenshotFeedbackTask: Task<Void, Never>?
     private var pageZoomFeedbackTask: Task<Void, Never>?
+    private var startedDownloadFeedbackTask: Task<Void, Never>?
     private var closingTabTasks: [UUID: Task<Void, Never>] = [:]
     /// One per tab awaiting its reveal deadline: see `scheduleInitialContentRevealDeadline`.
     private var revealDeadlineTasks: [UUID: Task<Void, Never>] = [:]
@@ -138,6 +142,7 @@ final class BrowserStore: ObservableObject {
         copiedAddressFeedbackTask?.cancel()
         copiedScreenshotFeedbackTask?.cancel()
         pageZoomFeedbackTask?.cancel()
+        startedDownloadFeedbackTask?.cancel()
         sidebarShortcutHintTask?.cancel()
         closingTabTasks.values.forEach { $0.cancel() }
         revealDeadlineTasks.values.forEach { $0.cancel() }
@@ -724,7 +729,26 @@ final class BrowserStore: ObservableObject {
         )
         downloads.insert(download, at: 0)
         persistence.saveDownload(download)
+        announceStartedDownload(download.id)
         return download.id
+    }
+
+    /// Raises the "download started" badge. Unlike the zoom badge it survives a tab change: a
+    /// link that opens a tab only to download closes that tab the moment the download begins.
+    private func announceStartedDownload(_ downloadID: UUID) {
+        startedDownloadID = downloadID
+        startedDownloadFeedbackTask?.cancel()
+        startedDownloadFeedbackTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2.8))
+            guard !Task.isCancelled else { return }
+            self?.startedDownloadID = nil
+        }
+    }
+
+    func showStartedDownload() {
+        startedDownloadFeedbackTask?.cancel()
+        startedDownloadID = nil
+        isDownloadsPresented = true
     }
 
     /// The name a download will have once complete. A name is taken by a file, by the partial

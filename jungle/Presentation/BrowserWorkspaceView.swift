@@ -35,6 +35,9 @@ struct BrowserWorkspaceView: View {
 
                 browserContent
                     .background(Color(nsColor: WebViewPool.contentBackground(isDark: usesDarkContent)))
+                    // Outside `browserContent`, whose fade on tab close would take the badge with
+                    // it: a tab opened only to download closes the moment the download begins.
+                    .overlay(alignment: .bottom) { startedDownloadFeedback }
             }
 
             if let previewID = store.tabPreviewID,
@@ -236,6 +239,29 @@ struct BrowserWorkspaceView: View {
             .animation(.easeIn(duration: 0.16), value: store.isClosingTab(tab.id))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private var startedDownloadFeedback: some View {
+        ZStack {
+            if let downloadID = store.startedDownloadID,
+               let download = store.downloads.first(where: { $0.id == downloadID }),
+               // A download that failed at once did not start; one from a background tab of
+               // another profile would open a Downloads list that does not show it.
+               download.state != .failed,
+               download.profileID == store.activeProfileID {
+                DownloadStartedFeedback(fileName: download.fileName, open: store.showStartedDownload)
+                    // A fresh badge, and a fresh hop, for every download.
+                    .id(downloadID)
+                    .frame(maxWidth: 420)
+                    .padding(.bottom, 20)
+                    .transition(
+                        .move(edge: .bottom)
+                            .combined(with: .scale(scale: 0.85, anchor: .bottom))
+                            .combined(with: .opacity)
+                    )
+            }
+        }
+        .animation(.spring(duration: 0.42, bounce: 0.34), value: store.startedDownloadID)
     }
 
     /// Carries the user's blocker switches to the two places that act on them: the rule lists

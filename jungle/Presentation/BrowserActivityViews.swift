@@ -220,6 +220,138 @@ struct BrowserDownloadsView: View {
     }
 }
 
+/// The badge a new download raises over the page: its file hops up and drops into the
+/// Downloads tray. Clicking it opens Downloads.
+struct DownloadStartedFeedback: View {
+    let fileName: String
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 10) {
+                DownloadDropGlyph()
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Download started")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    Text(fileName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.leading, 7)
+            .padding(.trailing, 14)
+            .padding(.vertical, 7)
+            // The window's colour, not a material, for the reason the find bar gives: a material
+            // takes its colour from the page under it and the text washed out over light pages.
+            .background(Color(nsColor: .windowBackgroundColor), in: Capsule())
+            .overlay(Capsule().strokeBorder(.primary.opacity(0.14)))
+            .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Show downloads")
+        .accessibilityLabel("Download started, \(fileName)")
+        .accessibilityHint("Shows downloads")
+    }
+}
+
+/// A file that hops, tilts and falls into a tray; the tray gives under its weight and a ring
+/// ripples out. Reduce Motion keeps the tray alone and still.
+private struct DownloadDropGlyph: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isDropping = false
+    @State private var landings = 0
+
+    private struct Hop {
+        /// From the tray's centre, so the glyph at rest is the tray alone, centred.
+        var offset: CGFloat = 0
+        var rotation: Double = 0
+        var scale: CGFloat = 0.8
+        /// Hidden at rest, so the file shows only while it is in the air.
+        var opacity: Double = 0
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Color.green.opacity(0.14))
+            if !reduceMotion {
+                landingRing
+            }
+            Image(systemName: "tray.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.green)
+                .symbolEffect(.bounce.down, value: landings)
+            if !reduceMotion {
+                hoppingFile
+            }
+        }
+        .frame(width: 30, height: 30)
+        .accessibilityHidden(true)
+        .task {
+            guard !reduceMotion else { return }
+            // Let the badge settle in before the file jumps.
+            try? await Task.sleep(for: .milliseconds(140))
+            guard !Task.isCancelled else { return }
+            isDropping = true
+            try? await Task.sleep(for: .milliseconds(560))
+            guard !Task.isCancelled else { return }
+            landings += 1
+        }
+    }
+
+    private var hoppingFile: some View {
+        Image(systemName: "doc.fill")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.green.gradient)
+            .keyframeAnimator(initialValue: Hop(), trigger: isDropping) { file, hop in
+                file
+                    .scaleEffect(hop.scale)
+                    .rotationEffect(.degrees(hop.rotation))
+                    .offset(y: hop.offset)
+                    .opacity(hop.opacity)
+            } keyframes: { _ in
+                KeyframeTrack(\.offset) {
+                    SpringKeyframe(-17, duration: 0.3, spring: .snappy)
+                    CubicKeyframe(-16, duration: 0.05)
+                    CubicKeyframe(0, duration: 0.22)
+                }
+                KeyframeTrack(\.rotation) {
+                    SpringKeyframe(-14, duration: 0.3, spring: .snappy)
+                    CubicKeyframe(8, duration: 0.14)
+                    CubicKeyframe(0, duration: 0.13)
+                }
+                KeyframeTrack(\.scale) {
+                    SpringKeyframe(1.15, duration: 0.3, spring: .bouncy)
+                    CubicKeyframe(1, duration: 0.1)
+                    CubicKeyframe(0.45, duration: 0.17)
+                }
+                KeyframeTrack(\.opacity) {
+                    LinearKeyframe(1, duration: 0.08)
+                    LinearKeyframe(1, duration: 0.4)
+                    LinearKeyframe(0, duration: 0.09)
+                }
+            }
+    }
+
+    /// Plays once per badge: each download gets a fresh view.
+    private var landingRing: some View {
+        Circle()
+            .strokeBorder(Color.green, lineWidth: 1.5)
+            .keyframeAnimator(initialValue: 0.0, trigger: landings) { ring, progress in
+                ring
+                    .scaleEffect(1 + progress * 0.7)
+                    .opacity(progress > 0 && progress < 1 ? (1 - progress) * 0.7 : 0)
+            } keyframes: { _ in
+                CubicKeyframe(1, duration: 0.5)
+            }
+    }
+}
+
 private struct DownloadRow: View {
     let download: BrowserDownload
     @ObservedObject var store: BrowserStore
